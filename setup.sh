@@ -663,7 +663,10 @@ confirm_admin_login() { # user port [本轮已确认的 user port]
   fi
   ip=$(public_ip)
   [[ -n "$ip" && "$ip" != '<服务器IP>' ]] || { err "无法确定服务器地址, 请核对网络后重新测试"; return 1; }
-  warn "请另开窗口测试:  ssh -o PreferredAuthentications=publickey -p $port $user@$ip   并执行 sudo -i"
+  warn "请另开窗口测试密钥登录:"
+  printf 'ssh -o PreferredAuthentications=publickey -p %s %s@%s\n\n' "$port" "$user" "$ip"
+  warn "登录后执行:"
+  printf 'sudo -i\n\n'
   confirm "$user 已用密钥登录该端口并 sudo 成功, 继续?" n || { warn "已取消"; return 1; }
 }
 step_nopass() { # [本轮已确认的 user port]; 单独运行不复用登录确认

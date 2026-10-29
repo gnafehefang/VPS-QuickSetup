@@ -612,12 +612,20 @@ test_noroot_reuses_only_matching_login_confirmation() (
         [[ "$NOROOT_TEST_CALLS" != *'confirm;'* && -z "$warnings" ]]
       else
         [[ "$NOROOT_TEST_CALLS" == *'confirm;'* \
-          && "$warnings" == *'-p 6090 admin@192.0.2.1'* \
-          && "$warnings" == *'PreferredAuthentications=publickey'* \
-          && "$warnings" != *'<服务器IP>'* && "$warnings" != *'-p 22 '* ]]
+          && "$warnings" == *'请另开窗口测试密钥登录:'* && "$warnings" == *'登录后执行:'* ]]
       fi
     ) || return 1
   done
+)
+
+test_admin_login_commands_are_separate_copyable_lines() (
+  make_noroot_fixture
+  warn() { printf 'WARN %s\n' "$*"; }
+  local output
+  output=$(confirm_admin_login admin 6090) || return 1
+  [[ "$output" == *$'\nssh -o PreferredAuthentications=publickey -p 6090 admin@192.0.2.1\n\n'* \
+    && "$output" == *$'\nsudo -i'* && "$output" != *'<服务器IP>'* ]] \
+    && [[ "$(grep -cxF 'sudo -i' <<<"$output")" == 1 ]]
 )
 
 test_noroot_cancelled_login_test_prevents_configuration() (
