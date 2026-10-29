@@ -695,16 +695,71 @@ make_account_report_fixture() {
 test_account_report_lists_all_users_and_unique_key_counts() (
   make_account_report_fixture || return 1
   cp "$ACCOUNT_TEST_DIR/admin/.ssh/authorized_keys" "$ACCOUNT_TEST_DIR/original" || return 1
+  cp "$ACCOUNT_TEST_DIR/admin/.ssh/authorized_keys2" "$ACCOUNT_TEST_DIR/original2" || return 1
   summary_accounts >"$ACCOUNT_TEST_OUTPUT" || return 1
-  grep -Eq '^root +0 +1 +/bin/bash$' "$ACCOUNT_TEST_OUTPUT" \
-    && grep -Eq '^admin +1000 +2 +/bin/bash$' "$ACCOUNT_TEST_OUTPUT" \
-    && grep -Eq '^ubuntu +1001 +1 +/bin/bash$' "$ACCOUNT_TEST_OUTPUT" \
-    && grep -Eq '^opc +1002 +0 +/bin/bash$' "$ACCOUNT_TEST_OUTPUT" \
-    && grep -Eq '^service +99 +0 +/usr/sbin/nologin$' "$ACCOUNT_TEST_OUTPUT" \
-    && grep -q 'SHA256:' "$ACCOUNT_TEST_OUTPUT" \
+  grep -qxF '账号总数: 5' "$ACCOUNT_TEST_OUTPUT" \
+    && grep -qxF 'root: 1 把密钥' "$ACCOUNT_TEST_OUTPUT" \
+    && grep -qxF 'admin: 2 把密钥' "$ACCOUNT_TEST_OUTPUT" \
+    && grep -qxF 'ubuntu: 1 把密钥' "$ACCOUNT_TEST_OUTPUT" \
+    && grep -qxF 'opc: 0 把密钥' "$ACCOUNT_TEST_OUTPUT" \
+    && grep -qxF 'service: 0 把密钥' "$ACCOUNT_TEST_OUTPUT" \
     && ! grep -qF 'private-comment-not-for-report' "$ACCOUNT_TEST_OUTPUT" \
     && ! grep -qF "${KEY_TEST_KEY#* }" "$ACCOUNT_TEST_OUTPUT" \
-    && cmp -s "$ACCOUNT_TEST_DIR/original" "$ACCOUNT_TEST_DIR/admin/.ssh/authorized_keys"
+    && ! grep -Eq 'UID|SHELL|KEYS|文件:|WARN|/bin/|/sbin/' "$ACCOUNT_TEST_OUTPUT" \
+    && ! grep -qF "$ACCOUNT_TEST_DIR" "$ACCOUNT_TEST_OUTPUT" \
+    && [[ "$(wc -l <"$ACCOUNT_TEST_OUTPUT")" == 10 ]] \
+    && cmp -s "$ACCOUNT_TEST_DIR/original" "$ACCOUNT_TEST_DIR/admin/.ssh/authorized_keys" \
+    && cmp -s "$ACCOUNT_TEST_DIR/original2" "$ACCOUNT_TEST_DIR/admin/.ssh/authorized_keys2"
+)
+
+test_account_report_masks_all_fingerprints() (
+  make_account_report_fixture || return 1
+  summary_accounts >"$ACCOUNT_TEST_OUTPUT" || return 1
+  local file fingerprint
+  for file in "$ACCOUNT_TEST_DIR/root/.ssh/authorized_keys" "$ACCOUNT_TEST_DIR/second-key.pub"; do
+    fingerprint=$(ssh-keygen -l -E sha256 -f "$file" | awk '{print $2}') || return 1
+    ! grep -qF "$fingerprint" "$ACCOUNT_TEST_OUTPUT" || return 1
+    fingerprint=${fingerprint#SHA256:}
+    grep -qxF "    SHA256:${fingerprint:0:6}********${fingerprint: -6}" "$ACCOUNT_TEST_OUTPUT" || return 1
+  done
+  [[ "$(grep -Ec '^    SHA256:[A-Za-z0-9+/=]{6}\*{8}[A-Za-z0-9+/=]{6}$' "$ACCOUNT_TEST_OUTPUT")" == 4 ]]
+)
+
+test_account_report_deduplicates_before_masking() (
+  make_account_report_fixture || return 1
+  ssh-keygen() {
+    case "${!#}" in
+      "$ACCOUNT_TEST_DIR/admin/.ssh/authorized_keys"|"$ACCOUNT_TEST_DIR/admin/.ssh/authorized_keys2")
+        printf '256 SHA256:ABCDEF0123456789012345678901234567890UVWXYZ (ED25519)\n'
+        printf '256 SHA256:ABCDEF1123456789012345678901234567890UVWXYZ (ED25519)\n' ;;
+      *) command ssh-keygen "$@" ;;
+    esac
+  }
+  summary_accounts >"$ACCOUNT_TEST_OUTPUT" || return 1
+  grep -qxF 'admin: 2 把密钥' "$ACCOUNT_TEST_OUTPUT" \
+    && [[ "$(grep -cxF '    SHA256:ABCDEF********UVWXYZ' "$ACCOUNT_TEST_OUTPUT")" == 2 ]] \
+    && ! grep -qF '0123456789' "$ACCOUNT_TEST_OUTPUT"
+)
+
+test_account_report_fully_masks_short_fingerprints() (
+  make_account_report_fixture || return 1
+  ssh-keygen() {
+    if [[ "${!#}" == "$ACCOUNT_TEST_DIR/root/.ssh/authorized_keys" ]]; then
+      printf '256 SHA256:ABCDEFUVWXYZ (ED25519)\n'
+    else command ssh-keygen "$@"; fi
+  }
+  summary_accounts >"$ACCOUNT_TEST_OUTPUT" || return 1
+  grep -qxF '    SHA256:********' "$ACCOUNT_TEST_OUTPUT" \
+    && ! grep -qF 'ABCDEF' "$ACCOUNT_TEST_OUTPUT" \
+    && ! grep -qF 'UVWXYZ' "$ACCOUNT_TEST_OUTPUT"
+)
+
+test_account_report_handles_long_names() (
+  make_account_report_fixture || return 1
+  ACCOUNT_TEST_EXTRA="snapd-range-524288-root:x:524288:524288::$ACCOUNT_TEST_DIR/service:/usr/sbin/nologin"$'\n'
+  summary_accounts >"$ACCOUNT_TEST_OUTPUT" || return 1
+  grep -qxF '账号总数: 6' "$ACCOUNT_TEST_OUTPUT" \
+    && grep -qxF 'snapd-range-524288-root: 0 把密钥' "$ACCOUNT_TEST_OUTPUT"
 )
 
 test_account_report_marks_unverified_sources_unknown() (
@@ -722,9 +777,22 @@ test_account_report_marks_unverified_sources_unknown() (
         bad-home) ACCOUNT_TEST_OPC_HOME=/ ;;
       esac
       summary_accounts >"$ACCOUNT_TEST_OUTPUT" || return 1
-      grep -Eq '^opc +1002 +0\+\? +/bin/bash$' "$ACCOUNT_TEST_OUTPUT"
+      grep -qxF 'opc: 0+? 把密钥' "$ACCOUNT_TEST_OUTPUT" \
+        && [[ "$(grep -c '^WARN ' "$ACCOUNT_TEST_OUTPUT")" == 1 ]] \
+        && ! grep -qF "$ACCOUNT_TEST_DIR" "$ACCOUNT_TEST_OUTPUT"
     ) || return 1
   done
+)
+
+test_account_report_summarizes_multiple_read_failures_once() (
+  make_account_report_fixture || return 1
+  mkdir -p "$ACCOUNT_TEST_OPC_HOME/.ssh" || return 1
+  printf 'invalid key\n' >"$ACCOUNT_TEST_OPC_HOME/.ssh/authorized_keys"
+  printf 'invalid key\n' >"$ACCOUNT_TEST_DIR/ubuntu/.ssh/authorized_keys2"
+  summary_accounts >"$ACCOUNT_TEST_OUTPUT" || return 1
+  grep -qxF 'opc: 0+? 把密钥' "$ACCOUNT_TEST_OUTPUT" \
+    && grep -qxF 'ubuntu: 1+? 把密钥' "$ACCOUNT_TEST_OUTPUT" \
+    && [[ "$(grep -c '^WARN ' "$ACCOUNT_TEST_OUTPUT")" == 1 ]]
 )
 
 test_account_report_warns_about_additional_uid_zero() (
@@ -739,7 +807,7 @@ test_account_report_enumeration_failure_is_not_empty_inventory() (
   local output
   warn() { printf '%s\n' "$*"; }
   if output=$(summary_accounts); then return 1; fi
-  [[ "$output" == *'账号清单读取失败'* && "$output" != *ACCOUNT* ]]
+  [[ "$output" == *'账号清单读取失败'* && "$output" != *'账号总数:'* ]]
 )
 
 test_summary_network_audit_only_reads_rules_and_listeners() (

@@ -831,44 +831,47 @@ summary_login_user() { # 仅为简单、可核对的密钥认证策略生成示�
   return 1
 }
 summary_accounts() {
-  local accounts u uid home sh file key_dump prints fingerprints details issues count
+  local accounts u uid home file key_dump prints fingerprints fingerprint issues count uncertain=no
   accounts=$(getent passwd) && [[ -n "$accounts" ]] || { warn "账号清单读取失败, 不能判断是否存在其他账号"; return 1; }
-  echo "KEYS = ~/.ssh/authorized_keys 和 authorized_keys2 中按指纹去重的有效公钥数; +? 表示有文件未能校验"
-  echo "包含系统服务账号; 有公钥不等于获准 SSH 登录。非标准 AuthorizedKeysFile、命令或 CA 来源不计入。"
-  printf '%-18s %-7s %-7s %s\n' ACCOUNT UID KEYS SHELL
-  while IFS=: read -r u _ uid _ _ home sh; do
-    fingerprints=""; details=""; issues=""
+  printf '账号总数: %s\n' "$(awk 'NF{n++} END{print n+0}' <<<"$accounts")"
+  while IFS=: read -r u _ uid _ _ home _; do
+    fingerprints=""; issues=no
     if [[ "$home" != /* || "$home" == / || -L "$home" || -L "$home/.ssh" ]]; then
-      issues="主目录为空、为根目录或存在符号链接, 未扫描公钥"
+      issues=yes
     else
       for file in "$home/.ssh/authorized_keys" "$home/.ssh/authorized_keys2"; do
         [[ -e "$file" || -L "$file" ]] || continue
         if [[ -L "$file" || ! -f "$file" || ! -r "$file" ]]; then
-          issues+="    无法安全读取: $file"$'\n'; continue
+          issues=yes; continue
         fi
         [[ -s "$file" ]] || continue
         if ! key_dump=$(ssh-keygen -l -E sha256 -f "$file" 2>/dev/null); then
-          issues+="    读取或公钥校验失败: $file"$'\n'; continue
+          issues=yes; continue
         fi
-        prints=$(awk '$1~/^[0-9]+$/ && $2~/^SHA256:[A-Za-z0-9+\/=]+$/ && $NF~/^\([A-Za-z0-9_-]+\)$/ {print $2, $NF}' <<<"$key_dump")
+        prints=$(awk '$1~/^[0-9]+$/ && $2~/^SHA256:[A-Za-z0-9+\/=]+$/ && $NF~/^\([A-Za-z0-9_-]+\)$/ {print $2}' <<<"$key_dump")
         if [[ -z "$prints" ]]; then
-          issues+="    未识别有效公钥指纹: $file"$'\n'; continue
+          issues=yes; continue
         fi
         fingerprints+="$prints"$'\n'
-        details+="    文件: $file"$'\n'
       done
     fi
     fingerprints=$(sort -u <<<"$fingerprints" | awk 'NF')
     count=$(awk 'NF{n++} END{print n+0}' <<<"$fingerprints")
-    [[ -z "$issues" ]] || count+='+?'
-    printf '%-18s %-7s %-7s %s\n' "$u" "$uid" "$count" "${sh:-未设置}"
-    [[ -z "$details" ]] || printf '%s' "$details"
+    if [[ "$issues" == yes ]]; then count+='+?'; uncertain=yes; fi
+    printf '%s: %s 把密钥\n' "$u" "$count"
     if [[ -n "$fingerprints" ]]; then
-      while IFS= read -r prints; do printf '    %s\n' "$prints"; done <<<"$fingerprints"
+      while IFS= read -r fingerprint; do
+        fingerprint=${fingerprint#SHA256:}
+        if (( ${#fingerprint} > 12 )); then
+          printf '    SHA256:%s********%s\n' "${fingerprint:0:6}" "${fingerprint: -6}"
+        else
+          printf '    SHA256:********\n'
+        fi
+      done <<<"$fingerprints"
     fi
-    [[ -z "$issues" ]] || warn "$issues"
     if [[ "$uid" =~ ^0+$ && "$u" != root ]]; then err "$u 也是 UID 0 账号, 必须人工核查"; fi
   done <<<"$accounts"
+  [[ "$uncertain" == no ]] || warn "+? 表示部分密钥来源未能读取或校验, 数量可能不完整"
   return 0
 }
 summary_section() { printf '\n%s========== %s ==========%s\n' "$c_blu" "$1" "$c_off"; }
@@ -906,9 +909,6 @@ summary() {
   echo "以上为全局有效配置, Match 等规则可能按用户或来源另行限制; 启用密钥认证不代表已验证登录。"
   summary_section "账号与公钥"
   summary_accounts || true
-  echo "公钥文件配置   : $(sshd_dump_val "$dump" authorizedkeysfile)"
-  echo "公钥查询命令   : $(sshd_dump_val "$dump" authorizedkeyscommand)"
-  echo "用户 CA 配置   : $(sshd_dump_val "$dump" trustedusercakeys)"
   summary_section "TCP / UDP 监听"
   if command -v ss >/dev/null; then ss -lntup || warn "读取监听端口失败"
   else warn "ss 未安装, 无法显示实际监听"; fi
