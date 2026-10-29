@@ -13,6 +13,26 @@ skip() { :; }
 warn() { :; }
 err() { printf '%s\n' "$*" >&2; }
 
+test_timezone_default_and_menu_match() (
+  [[ "$DEFAULT_TZ" == Asia/Singapore ]] \
+    && menu | grep -qF '设置时区 (默认 Asia/Singapore)'
+)
+
+test_timezone_enter_uses_default() (
+  TTY=$(mktemp) || return 1
+  printf '\n' >"$TTY"
+  ask "时区" "$DEFAULT_TZ" || return 1
+  [[ "$REPLY" == Asia/Singapore ]]
+)
+
+test_timezone_step_uses_configured_default() (
+  DEFAULT_TZ=UTC
+  timedatectl() { printf 'UTC\n'; }
+  ask() { [[ "$1" == 时区 && "$2" == "$DEFAULT_TZ" ]]; exit "$?"; }
+  step_tz
+  return 1
+)
+
 make_ssh_fixture() {
   local dir
   dir=$(mktemp -d "$TEST_TMP/ssh.XXXXXX") || return 1

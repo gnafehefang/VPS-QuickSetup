@@ -22,7 +22,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/gnafehefang/VPS-QuickSetup/m
 | 6 | 安装 fail2ban | `/etc/fail2ban/jail.d/sshd.local`：端口跟随 SSH，systemd 后端，10 分钟内失败 5 次封 1 小时 |
 | 7 | 禁用密码登录 | 没有任何用户配置有效公钥时拒绝执行，并要求确认已测试密钥登录 |
 | 8 | 禁用 root 登录 | 需要一个带公钥的 sudo 用户；写入 `PermitRootLogin no` + `AllowUsers <用户>`，可选锁定 root 密码 |
-| 9 | 设置时区 | 回车默认 `Asia/Shanghai` |
+| 9 | 设置时区 | 回车默认 `Asia/Singapore` |
 | 10 | 设置 swap | 已有 swap 则跳过；内存 <2G 建 2G，2–4G 与内存相同，>4G 建 4G；`swappiness=10` |
 | 11 | TCP 调优 | 开启 BBR + fq + `tcp_mtu_probing=1` |
 | 12 | ALL | 按安全顺序：1 → 9 → 2 → 3 → 4 → 5 → 6 → 10 → 11 → **暂停，另开窗口测试新端口 + admin 登录** → 7 → 8 → 关闭旧端口 |

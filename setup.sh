@@ -15,7 +15,7 @@ SWAP_SYSCTL="/etc/sysctl.d/99-quicksetup-swap.conf"
 TCP_SYSCTL="/etc/sysctl.d/99-quicksetup-tcp.conf"
 BACKUP_DIR="/root/quicksetup-backup/$(date +%Y%m%d-%H%M%S)"
 DEFAULT_PORT=6090
-DEFAULT_TZ="Asia/Shanghai"
+DEFAULT_TZ="Asia/Singapore"
 DEFAULT_ADMIN="admin"
 TTY=/dev/tty
 
