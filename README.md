@@ -17,7 +17,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/gnafehefang/VPS-QuickSetup/m
 | 1 | 系统更新 + 基础工具 | `apt update && apt upgrade`，安装 curl wget sudo 等 |
 | 2 | 设置时区 | 回车默认 `Asia/Singapore` |
 | 3 | 添加公钥 | 粘贴公钥，或从 `https://github.com/<用户名>.keys` 拉取；用 `ssh-keygen -l` 校验，重复的不加 |
-| 4 | 创建 admin 用户 | 默认用户名 `admin`，复制 root 的公钥，加入 sudo 组，可选免密 sudo（`/etc/sudoers.d/90-<用户>`，visudo 校验） |
+| 4 | 创建 admin 用户 | 默认用户名 `admin`，已有同名组时复用；复制 root 的公钥，加入 sudo 组，可选免密 sudo（`/etc/sudoers.d/90-<用户>`，visudo 校验）；账户、公钥或 sudo 配置失败立即停止本步骤，不标记为可用管理员 |
 | 5 | 修改 SSH 端口 | 回车默认 6090；UFW 已启用时先放行新端口；过渡期同时保留旧端口，确认新端口能登录后再关闭旧端口（sshd + UFW）；自动处理 `ssh.socket` |
 | 6 | 安装 UFW | 启用前自动放行当前 SSH 端口，默认拒绝入站 |
 | 7 | 安装 fail2ban | `/etc/fail2ban/jail.d/sshd.local`：端口跟随 SSH，systemd 后端，10 分钟内失败 5 次封 1 小时 |

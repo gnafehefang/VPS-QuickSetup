@@ -13,6 +13,170 @@ skip() { :; }
 warn() { :; }
 err() { printf '%s\n' "$*" >&2; }
 
+make_admin_fixture() {
+  local dir
+  dir=$(mktemp -d "$TEST_TMP/admin.XXXXXX") || return 1
+  ADMIN_TEST_HOME="$dir/admin"
+  ADMIN_TEST_ROOT_HOME="$dir/root"
+  SUDOERS_DIR="$dir/sudoers.d"
+  BACKUP_DIR="$dir/backups"
+  TTY="$dir/tty"
+  mkdir -p "$ADMIN_TEST_ROOT_HOME/.ssh" "$ADMIN_TEST_HOME" "$SUDOERS_DIR" || return 1
+  printf 'fixture-public-key\n' >"$ADMIN_TEST_ROOT_HOME/.ssh/authorized_keys"
+  : >"$TTY"
+  ADMIN_TEST_EXISTS=no
+  ADMIN_TEST_GROUP_EXISTS=yes
+  ADMIN_TEST_SUDO=no
+  ADMIN_TEST_USERADD_FAIL=no
+  ADMIN_TEST_CREATE_SILENT=no
+  ADMIN_TEST_USERMOD_FAIL=no
+  ADMIN_TEST_COPY_FAIL=no
+  ADMIN_TEST_VISUDO_FAIL=no
+  ADMIN_TEST_PASSWORD_FAIL=no
+  ADMIN_TEST_UID=1000
+  ADMIN_TEST_SHELL=/bin/bash
+  ADMIN_TEST_USERADD_ARGS=''
+  ADMIN_TEST_USERMOD_CALLS=0
+  ADMIN_USER=stale
+  apt_install() { return 0; }
+  ask() { [[ "$1" == 管理员用户名 ]] && REPLY='admin' || REPLY="${ADMIN_TEST_MANUAL_KEY:-}"; }
+  getent() {
+    case "$1:$2" in
+      group:admin) [[ "$ADMIN_TEST_GROUP_EXISTS" == yes ]] && printf 'admin:x:1000:\n' ;;
+      passwd:admin)
+        [[ "$ADMIN_TEST_EXISTS" == yes ]] || return 2
+        printf 'admin:x:%s:1000::%s:%s\n' "$ADMIN_TEST_UID" "$ADMIN_TEST_HOME" "$ADMIN_TEST_SHELL" ;;
+      passwd:root) printf 'root:x:0:0::%s:/bin/bash\n' "$ADMIN_TEST_ROOT_HOME" ;;
+      *) return 2 ;;
+    esac
+  }
+  id() {
+    [[ "$ADMIN_TEST_EXISTS" == yes ]] || return 1
+    case "$*" in
+      admin) return 0 ;;
+      '-nG admin') printf 'admin'; [[ "$ADMIN_TEST_SUDO" == yes ]] && printf ' sudo'; printf '\n' ;;
+      *) return 1 ;;
+    esac
+  }
+  useradd() {
+    ADMIN_TEST_USERADD_ARGS="$*"
+    [[ "$ADMIN_TEST_USERADD_FAIL" == no ]] || return 1
+    [[ "$ADMIN_TEST_CREATE_SILENT" == yes ]] || ADMIN_TEST_EXISTS=yes
+  }
+  usermod() {
+    ((ADMIN_TEST_USERMOD_CALLS+=1))
+    [[ "$ADMIN_TEST_USERMOD_FAIL" == no ]] || return 1
+    ADMIN_TEST_SUDO=yes
+  }
+  has_keys() {
+    local key_home="$ADMIN_TEST_HOME"
+    [[ "$1" == root ]] && key_home="$ADMIN_TEST_ROOT_HOME"
+    [[ -s "$key_home/.ssh/authorized_keys" ]]
+  }
+  add_key_lines() {
+    [[ "$ADMIN_TEST_COPY_FAIL" == no && "$ADMIN_TEST_EXISTS" == yes && "$1" == admin ]] || return 1
+    mkdir -p "$ADMIN_TEST_HOME/.ssh" && cat >"$ADMIN_TEST_HOME/.ssh/authorized_keys"
+  }
+  confirm() { return 0; }
+  visudo() { [[ "$ADMIN_TEST_VISUDO_FAIL" == no ]]; }
+  passwd() {
+    if [[ "$1" == -S ]]; then printf 'admin L\n'
+    else [[ "$ADMIN_TEST_PASSWORD_FAIL" == no ]]; fi
+  }
+}
+
+test_admin_reuses_existing_same_name_group() (
+  make_admin_fixture || return 1
+  step_admin || return 1
+  [[ "$ADMIN_TEST_USERADD_ARGS" == '-m -s /bin/bash -g admin admin' \
+    && "$ADMIN_TEST_EXISTS" == yes && "$ADMIN_TEST_SUDO" == yes && "$ADMIN_USER" == admin ]] \
+    && grep -qx 'admin ALL=(ALL) NOPASSWD:ALL' "$SUDOERS_DIR/90-admin"
+)
+
+test_admin_creates_private_group_when_missing() (
+  make_admin_fixture || return 1
+  ADMIN_TEST_GROUP_EXISTS=no
+  step_admin || return 1
+  [[ "$ADMIN_TEST_USERADD_ARGS" == '-m -s /bin/bash -U admin' && "$ADMIN_USER" == admin ]]
+)
+
+test_admin_useradd_failure_stops_all_followup() (
+  make_admin_fixture || return 1
+  ADMIN_TEST_USERADD_FAIL=yes
+  if step_admin; then return 1; fi
+  [[ -z "$ADMIN_USER" && "$ADMIN_TEST_USERMOD_CALLS" == 0 \
+    && ! -e "$ADMIN_TEST_HOME/.ssh" && ! -e "$SUDOERS_DIR/90-admin" ]]
+)
+
+test_admin_missing_account_after_useradd_stops() (
+  make_admin_fixture || return 1
+  ADMIN_TEST_CREATE_SILENT=yes
+  if step_admin; then return 1; fi
+  [[ -z "$ADMIN_USER" && "$ADMIN_TEST_USERMOD_CALLS" == 0 && ! -e "$SUDOERS_DIR/90-admin" ]]
+)
+
+test_admin_sudo_install_failure_prevents_useradd() (
+  make_admin_fixture || return 1
+  apt_install() { return 1; }
+  if step_admin; then return 1; fi
+  [[ -z "$ADMIN_USER" && -z "$ADMIN_TEST_USERADD_ARGS" ]]
+)
+
+test_admin_usermod_failure_stops_before_keys_and_sudoers() (
+  make_admin_fixture || return 1
+  ADMIN_TEST_USERMOD_FAIL=yes
+  if step_admin; then return 1; fi
+  [[ -z "$ADMIN_USER" && ! -e "$ADMIN_TEST_HOME/.ssh" && ! -e "$SUDOERS_DIR/90-admin" ]]
+)
+
+test_admin_copy_failure_does_not_publish_or_write_sudoers() (
+  make_admin_fixture || return 1
+  ADMIN_TEST_COPY_FAIL=yes
+  if step_admin; then return 1; fi
+  [[ -z "$ADMIN_USER" && ! -e "$SUDOERS_DIR/90-admin" ]]
+)
+
+test_admin_missing_key_cancels_without_sudoers() (
+  make_admin_fixture || return 1
+  rm -f -- "$ADMIN_TEST_ROOT_HOME/.ssh/authorized_keys"
+  if step_admin; then return 1; fi
+  [[ -z "$ADMIN_USER" && ! -e "$SUDOERS_DIR/90-admin" ]]
+)
+
+test_admin_visudo_failure_preserves_existing_policy() (
+  make_admin_fixture || return 1
+  printf 'admin ALL=(ALL) ALL\n' >"$SUDOERS_DIR/90-admin"
+  ADMIN_TEST_VISUDO_FAIL=yes
+  if step_admin; then return 1; fi
+  [[ -z "$ADMIN_USER" ]] && grep -qx 'admin ALL=(ALL) ALL' "$SUDOERS_DIR/90-admin"
+)
+
+test_admin_password_failure_does_not_publish_user() (
+  make_admin_fixture || return 1
+  confirm() { return 1; }
+  ADMIN_TEST_PASSWORD_FAIL=yes
+  if step_admin; then return 1; fi
+  [[ -z "$ADMIN_USER" && ! -e "$SUDOERS_DIR/90-admin" ]]
+)
+
+test_admin_existing_account_is_reusable() (
+  make_admin_fixture || return 1
+  ADMIN_TEST_EXISTS=yes
+  step_admin || return 1
+  [[ -z "$ADMIN_TEST_USERADD_ARGS" && "$ADMIN_USER" == admin ]]
+)
+
+test_admin_rejects_root_uid_and_nonlogin_shell() (
+  make_admin_fixture || return 1
+  ADMIN_TEST_UID=0
+  if step_admin; then return 1; fi
+  [[ -z "$ADMIN_USER" && "$ADMIN_TEST_USERMOD_CALLS" == 0 ]] || return 1
+  ADMIN_TEST_UID=1000
+  ADMIN_TEST_SHELL=/usr/sbin/nologin
+  if step_admin; then return 1; fi
+  [[ -z "$ADMIN_USER" && "$ADMIN_TEST_USERMOD_CALLS" == 0 ]]
+)
+
 test_timezone_default_and_menu_match() (
   [[ "$DEFAULT_TZ" == Asia/Singapore ]] \
     && menu | grep -qF '设置时区 (默认 Asia/Singapore)'
