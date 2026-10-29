@@ -905,7 +905,6 @@ summary_accounts() {
     displayed+="$entry"$'\n'
   done <<<"$accounts"
   displayed=${displayed%$'\n'}
-  printf '系统账号总数: %s\n' "$(awk 'NF{n++} END{print n+0}' <<<"$accounts")"
   printf '登录及带公钥账号: %s\n' "$(awk 'NF{n++} END{print n+0}' <<<"$displayed")"
   [[ -n "$displayed" ]] || return 0
   while IFS=: read -r u _ uid _ _ home _; do

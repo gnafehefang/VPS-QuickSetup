@@ -816,7 +816,7 @@ test_account_report_lists_login_users_and_unique_key_counts() (
   cp "$ACCOUNT_TEST_DIR/admin/.ssh/authorized_keys" "$ACCOUNT_TEST_DIR/original" || return 1
   cp "$ACCOUNT_TEST_DIR/admin/.ssh/authorized_keys2" "$ACCOUNT_TEST_DIR/original2" || return 1
   summary_accounts >"$ACCOUNT_TEST_OUTPUT" || return 1
-  grep -qxF '系统账号总数: 5' "$ACCOUNT_TEST_OUTPUT" \
+  ! grep -qF '系统账号总数:' "$ACCOUNT_TEST_OUTPUT" \
     && grep -qxF '登录及带公钥账号: 4' "$ACCOUNT_TEST_OUTPUT" \
     && grep -qxF 'root: 1 把密钥' "$ACCOUNT_TEST_OUTPUT" \
     && grep -qxF 'admin: 2 把密钥' "$ACCOUNT_TEST_OUTPUT" \
@@ -827,7 +827,7 @@ test_account_report_lists_login_users_and_unique_key_counts() (
     && ! grep -qF "${KEY_TEST_KEY#* }" "$ACCOUNT_TEST_OUTPUT" \
     && ! grep -Eq 'UID|SHELL|KEYS|文件:|WARN|/bin/|/sbin/' "$ACCOUNT_TEST_OUTPUT" \
     && ! grep -qF "$ACCOUNT_TEST_DIR" "$ACCOUNT_TEST_OUTPUT" \
-    && [[ "$(wc -l <"$ACCOUNT_TEST_OUTPUT")" == 10 ]] \
+    && [[ "$(wc -l <"$ACCOUNT_TEST_OUTPUT")" == 9 ]] \
     && cmp -s "$ACCOUNT_TEST_DIR/original" "$ACCOUNT_TEST_DIR/admin/.ssh/authorized_keys" \
     && cmp -s "$ACCOUNT_TEST_DIR/original2" "$ACCOUNT_TEST_DIR/admin/.ssh/authorized_keys2"
 )
@@ -878,8 +878,7 @@ test_account_report_handles_long_names() (
   make_account_report_fixture || return 1
   ACCOUNT_TEST_EXTRA="long-custom-login-account:x:1003:1003::$ACCOUNT_TEST_DIR/service:/bin/bash"$'\n'
   summary_accounts >"$ACCOUNT_TEST_OUTPUT" || return 1
-  grep -qxF '系统账号总数: 6' "$ACCOUNT_TEST_OUTPUT" \
-    && grep -qxF '登录及带公钥账号: 5' "$ACCOUNT_TEST_OUTPUT" \
+  grep -qxF '登录及带公钥账号: 5' "$ACCOUNT_TEST_OUTPUT" \
     && grep -qxF 'long-custom-login-account: 0 把密钥' "$ACCOUNT_TEST_OUTPUT"
 )
 
@@ -887,8 +886,7 @@ test_account_report_hides_nonlogin_services_without_keys() (
   make_account_report_fixture || return 1
   ACCOUNT_TEST_EXTRA=$'bin:x:2:2::/:/usr/sbin/nologin\nsync:x:4:65534::/:/bin/sync\nno-login:x:5:5::/:/bin/false\n'
   summary_accounts >"$ACCOUNT_TEST_OUTPUT" || return 1
-  grep -qxF '系统账号总数: 8' "$ACCOUNT_TEST_OUTPUT" \
-    && grep -qxF '登录及带公钥账号: 4' "$ACCOUNT_TEST_OUTPUT" \
+  grep -qxF '登录及带公钥账号: 4' "$ACCOUNT_TEST_OUTPUT" \
     && ! grep -Eq '^(bin|sync|service|no-login):|^WARN ' "$ACCOUNT_TEST_OUTPUT"
 )
 
@@ -923,9 +921,8 @@ test_account_report_empty_login_list_has_no_phantom_account() (
   make_account_report_fixture || return 1
   getent() { printf 'daemon:x:1:1::/:/usr/sbin/nologin\nsync:x:4:65534::/:/bin/sync\n'; }
   summary_accounts >"$ACCOUNT_TEST_OUTPUT" || return 1
-  grep -qxF '系统账号总数: 2' "$ACCOUNT_TEST_OUTPUT" \
-    && grep -qxF '登录及带公钥账号: 0' "$ACCOUNT_TEST_OUTPUT" \
-    && [[ "$(wc -l <"$ACCOUNT_TEST_OUTPUT")" == 2 ]]
+  grep -qxF '登录及带公钥账号: 0' "$ACCOUNT_TEST_OUTPUT" \
+    && [[ "$(wc -l <"$ACCOUNT_TEST_OUTPUT")" == 1 ]]
 )
 
 test_account_report_marks_unverified_sources_unknown() (
@@ -975,7 +972,7 @@ test_account_report_enumeration_failure_is_not_empty_inventory() (
   local output
   warn() { printf '%s\n' "$*"; }
   if output=$(summary_accounts); then return 1; fi
-  [[ "$output" == *'账号清单读取失败'* && "$output" != *'系统账号总数:'* ]]
+  [[ "$output" == *'账号清单读取失败'* && "$output" != *'登录及带公钥账号:'* ]]
 )
 
 test_summary_network_audit_only_reads_rules_and_listeners() (
