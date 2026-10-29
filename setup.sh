@@ -17,7 +17,8 @@ HOSTNAME_FILE="/etc/hostname"
 HOSTS_FILE="/etc/hosts"
 SUDOERS_DIR="/etc/sudoers.d"
 BACKUP_DIR="/root/quicksetup-backup/$(date +%Y%m%d-%H%M%S)"
-DEFAULT_PORT=6090
+SSH_RANDOM_PORT_MIN=49152
+SSH_RANDOM_PORT_MAX=65535
 DEFAULT_TZ="Asia/Singapore"
 DEFAULT_ADMIN="admin"
 TTY=/dev/tty
@@ -496,6 +497,20 @@ admin_login_ready() {
 # ---------- 5. 修改 SSH 端口 ----------
 PENDING_OLD_PORTS=""
 SELECTED_SSH_PORT=""
+random_ssh_port() { # random_ssh_port "当前 SSH 端口", 同时避开已有 TCP 连接占用的本地端口。
+  local current="${1:-}" sockets used candidates port
+  sockets=$(ss -tanH 2>/dev/null) || { err "无法读取 TCP 端口占用情况, 不自动选择端口"; return 1; }
+  used=$(awk '{p=$4; sub(/^.*:/,"",p); if(p~/^[0-9]+$/) print p}' <<<"$sockets" | paste -sd' ' -)
+  current=${current//$'\n'/ }
+  candidates=$(shuf -i "$SSH_RANDOM_PORT_MIN-$SSH_RANDOM_PORT_MAX") \
+    || { err "无法生成随机端口候选"; return 1; }
+  for port in $candidates; do
+    [[ "$port" =~ ^[1-9][0-9]{0,4}$ && "$port" -ge "$SSH_RANDOM_PORT_MIN" && "$port" -le "$SSH_RANDOM_PORT_MAX" ]] || continue
+    [[ " $current $used " != *" $port "* ]] || continue
+    printf '%s\n' "$port"; return 0
+  done
+  err "随机范围 $SSH_RANDOM_PORT_MIN-$SSH_RANDOM_PORT_MAX 内没有可用端口"; return 1
+}
 remove_old_ports() { # remove_old_ports "p1 p2" keep
   local olds="$1" keep="$2" p
   [[ -z "$olds" ]] && return 0
@@ -515,15 +530,24 @@ remove_old_ports() { # remove_old_ports "p1 p2" keep
   ok "已关闭旧端口: $olds, 现在只监听 $keep"
 }
 step_port() { # step_port [defer]
-  local defer="${1:-}" cur new p olds=""
+  local defer="${1:-}" cur new suggested sockets p olds=""
   SELECTED_SSH_PORT=""
-  cur=$(ssh_ports | tr '\n' ' '); cur="${cur% }"
+  cur=$(ssh_ports) && [[ -n "$cur" ]] || { err "无法确认当前 SSH 端口, 停止修改"; return 1; }
+  cur=${cur//$'\n'/ }
   info "当前 SSH 端口: $cur"
-  ask "新的 SSH 端口" "$DEFAULT_PORT"; new="$REPLY"
+  if suggested=$(random_ssh_port "$cur"); then
+    ask "新的 SSH 端口 [随机范围: $SSH_RANDOM_PORT_MIN-$SSH_RANDOM_PORT_MAX, 回车使用: $suggested]" ""
+  else
+    suggested=""
+    warn "随机默认端口不可用, 请手动输入"
+    ask "新的 SSH 端口 [随机范围: $SSH_RANDOM_PORT_MIN-$SSH_RANDOM_PORT_MAX, 需手动输入]" ""
+  fi
+  new="${REPLY:-$suggested}"
   [[ "$new" =~ ^[1-9][0-9]{0,4}$ && "$new" -le 65535 ]] || { err "端口不合法, 请输入 1-65535 且不要加前导零"; return 1; }
   for p in $cur; do [[ "$p" != "$new" ]] && olds="$olds $p"; done; olds="${olds# }"
   if [[ "$cur" == "$new" ]]; then SELECTED_SSH_PORT="$new"; skip "SSH 已经只监听 $new"; return 0; fi
-  if ss -ltnH "( sport = :$new )" 2>/dev/null | grep -q . && [[ " $cur " != *" $new "* ]]; then err "端口 $new 已被其他程序占用"; return 1; fi
+  sockets=$(ss -tanH "( sport = :$new )" 2>/dev/null) || { err "无法复核 TCP 端口占用情况, 停止修改"; return 1; }
+  if [[ -n "$sockets" && " $cur " != *" $new "* ]]; then err "端口 $new 已被其他程序或 TCP 连接占用"; return 1; fi
   if command -v ufw >/dev/null; then
     local status
     status=$(LC_ALL=C ufw status) || { err "无法读取 UFW 状态, 停止修改 SSH 端口"; return 1; }
@@ -1002,7 +1026,7 @@ ${c_grn}======= VPS-QuickSetup =======${c_off}
  2. 设置时区 (默认 $DEFAULT_TZ)
  3. 添加公钥 (启用密钥登录)
  4. 创建 admin 用户
- 5. 修改 SSH 端口 (默认 $DEFAULT_PORT)
+ 5. 修改 SSH 端口 (默认随机 $SSH_RANDOM_PORT_MIN-$SSH_RANDOM_PORT_MAX)
  6. 安装 UFW
  7. 安装 fail2ban
  8. 设置 swap

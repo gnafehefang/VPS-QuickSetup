@@ -1277,7 +1277,7 @@ test_menu_displays_safe_order() (
     "2. 设置时区 (默认 $DEFAULT_TZ)" \
     '3. 添加公钥 (启用密钥登录)' \
     '4. 创建 admin 用户' \
-    "5. 修改 SSH 端口 (默认 $DEFAULT_PORT)" \
+    "5. 修改 SSH 端口 (默认随机 $SSH_RANDOM_PORT_MIN-$SSH_RANDOM_PORT_MAX)" \
     '6. 安装 UFW' \
     '7. 安装 fail2ban' \
     '8. 设置 swap' \
@@ -1443,9 +1443,131 @@ test_all_keeps_selected_lower_port() (
 
 test_same_port_records_selection() (
   ssh_ports() { printf '6090\n'; }
+  random_ssh_port() { printf '52783\n'; }
   ask() { REPLY=6090; }
   step_port || return 1
   [[ "$SELECTED_SSH_PORT" == 6090 ]]
+)
+
+make_port_fixture() {
+  make_ssh_fixture || return 1
+  PORT_TEST_CURRENT=22
+  PORT_TEST_CANDIDATES=$'52783\n52784\n65535'
+  PORT_TEST_SOCKETS=''
+  PORT_TEST_RECHECK=''
+  PORT_TEST_INPUT=''
+  PORT_TEST_PROMPT=''
+  PORT_TEST_BEGIN=no
+  PORT_TEST_APPLY=''
+  PORT_TEST_SS_FAIL=no
+  PENDING_OLD_PORTS=''
+  SELECTED_SSH_PORT=''
+  ssh_ports() { printf '%s\n' "$PORT_TEST_CURRENT"; }
+  ss() {
+    [[ "$PORT_TEST_SS_FAIL" == no ]] || return 1
+    if [[ "$*" == -tanH ]]; then printf '%s' "$PORT_TEST_SOCKETS"
+    elif [[ "$1" == -tanH && "$2" == '( sport = :'* ]]; then printf '%s' "$PORT_TEST_RECHECK"
+    else return 1; fi
+  }
+  shuf() { [[ "$*" == "-i $SSH_RANDOM_PORT_MIN-$SSH_RANDOM_PORT_MAX" ]] && printf '%s\n' "$PORT_TEST_CANDIDATES"; }
+  ask() { PORT_TEST_PROMPT="$1"; REPLY="$PORT_TEST_INPUT"; }
+  ufw() { [[ "$*" == status ]] && printf 'Status: inactive\n'; }
+  sshd_begin_change() { PORT_TEST_BEGIN=yes; }
+  sshd_apply() { PORT_TEST_APPLY="$*"; }
+  f2b_refresh() { :; }
+}
+
+test_random_port_skips_current_listening_and_connected_ports() (
+  make_port_fixture || return 1
+  PORT_TEST_CURRENT=$'22\n52783'
+  PORT_TEST_CANDIDATES=$'52783\n52784\n52785\n65535'
+  PORT_TEST_SOCKETS=$'LISTEN 0 128 0.0.0.0:52784 0.0.0.0:*\nESTAB 0 0 [2001:db8::1]:52785 [2001:db8::2]:443'
+  [[ "$(random_ssh_port "$PORT_TEST_CURRENT")" == 65535 ]]
+)
+
+test_random_port_real_generator_stays_in_range() (
+  ss() { return 0; }
+  local port _attempt
+  for _attempt in {1..8}; do
+    port=$(random_ssh_port 22) || return 1
+    [[ "$port" -ge 49152 && "$port" -le 65535 ]] || return 1
+  done
+)
+
+test_port_enter_uses_displayed_random_candidate_and_keeps_old_port() (
+  make_port_fixture || return 1
+  step_port defer || return 1
+  [[ "$SELECTED_SSH_PORT" == 52783 && "$PENDING_OLD_PORTS" == 22 \
+    && "$PORT_TEST_PROMPT" == *'随机范围: 49152-65535, 回车使用: 52783'* \
+    && "$PORT_TEST_APPLY" == restart ]] \
+    && grep -qx 'Port 22' "$QS_CONF" && grep -qx 'Port 52783' "$QS_CONF"
+)
+
+test_port_random_default_is_recomputed_each_time() (
+  local candidate
+  for candidate in 52783 65535; do
+    make_port_fixture || return 1
+    PORT_TEST_CANDIDATES="$candidate"
+    step_port defer || return 1
+    [[ "$SELECTED_SSH_PORT" == "$candidate" && "$PORT_TEST_PROMPT" == *"回车使用: $candidate"* ]] || return 1
+  done
+)
+
+test_port_manual_input_overrides_random_default() (
+  local manual
+  for manual in 1024 6090 65535; do
+    make_port_fixture || return 1
+    PORT_TEST_INPUT="$manual"
+    step_port defer || return 1
+    [[ "$SELECTED_SSH_PORT" == "$manual" && "$PENDING_OLD_PORTS" == 22 ]] || return 1
+    grep -qx "Port $manual" "$QS_CONF" || return 1
+  done
+)
+
+test_port_manual_input_still_works_when_random_range_is_full() (
+  make_port_fixture || return 1
+  SSH_RANDOM_PORT_MIN=52783
+  SSH_RANDOM_PORT_MAX=52783
+  PORT_TEST_CANDIDATES=52783
+  PORT_TEST_SOCKETS='LISTEN 0 128 0.0.0.0:52783 0.0.0.0:*'
+  PORT_TEST_INPUT=6090
+  step_port defer || return 1
+  [[ "$SELECTED_SSH_PORT" == 6090 && "$PORT_TEST_PROMPT" == *'需手动输入'* ]]
+)
+
+test_port_recheck_rejects_race_or_manual_occupied_port_before_changes() (
+  local manual
+  for manual in '' 6090; do
+    make_port_fixture || return 1
+    PORT_TEST_INPUT="$manual"
+    PORT_TEST_RECHECK="ESTAB 0 0 192.0.2.1:${manual:-52783} 198.51.100.1:443"
+    if step_port defer; then return 1; fi
+    [[ "$PORT_TEST_BEGIN" == no && -z "$SELECTED_SSH_PORT" ]] \
+      && grep -qx 'Port 22' "$QS_CONF" || return 1
+  done
+)
+
+test_port_failed_socket_query_cannot_select_or_apply_default() (
+  make_port_fixture || return 1
+  PORT_TEST_SS_FAIL=yes
+  PORT_TEST_INPUT=52783
+  if step_port defer; then return 1; fi
+  [[ "$PORT_TEST_BEGIN" == no && -z "$SELECTED_SSH_PORT" ]]
+)
+
+test_port_failed_random_generator_and_blank_input_do_not_change_config() (
+  make_port_fixture || return 1
+  shuf() { return 1; }
+  if step_port defer; then return 1; fi
+  [[ "$PORT_TEST_BEGIN" == no && -z "$SELECTED_SSH_PORT" ]] \
+    && grep -qx 'Port 22' "$QS_CONF"
+)
+
+test_port_failed_current_port_query_stops_before_prompt() (
+  make_port_fixture || return 1
+  ssh_ports() { printf '22\n'; return 1; }
+  if step_port defer; then return 1; fi
+  [[ -z "$PORT_TEST_PROMPT" && "$PORT_TEST_BEGIN" == no && -z "$SELECTED_SSH_PORT" ]]
 )
 
 test_rejects_removing_kept_port() (
@@ -1813,6 +1935,7 @@ test_noncanonical_port_cannot_bypass_old_port_guard() (
 
 test_port_with_leading_zero_is_rejected_before_changes() (
   ssh_ports() { printf '22\n'; }
+  random_ssh_port() { printf '52783\n'; }
   ask() { REPLY=00022; }
   if step_port; then return 1; fi
   [[ -z "$SELECTED_SSH_PORT" ]]

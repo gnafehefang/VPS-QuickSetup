@@ -18,7 +18,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/gnafehefang/VPS-QuickSetup/m
 | 2 | 设置时区 | 回车默认 `Asia/Singapore` |
 | 3 | 添加公钥 | 粘贴公钥，或从 `https://github.com/<用户名>.keys` 拉取；所选用户已有有效公钥时，默认 `0` 保留并跳过，也可继续添加；粘贴内容或 GitHub 用户名留空时，重新校验现有公钥，通过才跳过；重复的不加，写入或权限设置失败、全部无效时返回失败 |
 | 4 | 创建 admin 用户 | 默认用户名 `admin`，已有同名组时复用；复制 root 的公钥，加入 sudo 组，可选免密 sudo（`/etc/sudoers.d/90-<用户>`，visudo 校验）；账户、公钥或 sudo 配置失败立即停止本步骤，不标记为可用管理员 |
-| 5 | 修改 SSH 端口 | 回车默认 6090；UFW 已启用时先放行新端口；过渡期同时保留旧端口，确认新端口能登录后再关闭旧端口（sshd + UFW）；自动处理 `ssh.socket` |
+| 5 | 修改 SSH 端口 | 每次进入时从 `49152-65535` 中随机推荐一个端口，提示范围及本次候选值，回车采用；可手动输入 `1-65535`（不接受前导零），输入当前唯一端口可保持不变。随机选择避开当前 SSH 端口和已有 TCP 连接/监听的本地端口，应用前复核占用；无法生成随机默认值时仍可手动输入。UFW 已启用时先放行新端口；过渡期保留旧端口，确认新端口能登录后再关闭（sshd + UFW）；自动处理 `ssh.socket` |
 | 6 | 安装 UFW | 启用前自动放行当前 SSH 端口，默认拒绝入站 |
 | 7 | 安装 fail2ban | `/etc/fail2ban/jail.d/sshd.local`：端口跟随 SSH，systemd 后端，10 分钟内失败 5 次封 1 小时 |
 | 8 | 设置 swap | 已有 swap 则跳过；内存 <2G 建 2G，2–4G 与内存相同，>4G 建 4G；`swappiness=10` |
