@@ -1007,7 +1007,8 @@ summary() {
       printf '%s\n' "$ufw_dump"
     else summary_status "UFW 已启用     " "" yes; warn "无法读取 UFW 规则"; fi
   else summary_status "UFW 已启用     " no yes; echo "未安装"; fi
-  echo "保留既有规则, 不自动清空; 放行端口不等于有进程监听, UFW 也不代表云防火墙或全部 netfilter 规则。"
+  summary_note "保留既有规则, 不自动清空; 放行端口不等于有进程监听。" \
+    "UFW 也不代表云防火墙或全部 netfilter 规则。"
   summary_section "fail2ban"
   if command -v fail2ban-client >/dev/null; then
     if f2b_dump=$(fail2ban-client status sshd 2>/dev/null); then

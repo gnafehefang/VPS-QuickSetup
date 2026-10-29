@@ -1078,6 +1078,13 @@ test_summary_listener_explanation_starts_after_blank_line() (
   summary_note_after_blank '以上包含回环和系统服务监听'
 )
 
+test_summary_firewall_explanation_starts_after_blank_line() (
+  make_summary_fixture || return 1
+  summary >"$SUMMARY_TEST_OUTPUT" || return 1
+  summary_note_after_blank '保留既有规则' \
+    && grep -qF '       UFW 也不代表云防火墙或全部 netfilter 规则。' "$SUMMARY_TEST_OUTPUT"
+)
+
 test_summary_sections_have_colored_headers_and_blank_lines() (
   make_summary_fixture || return 1
   summary >"$SUMMARY_TEST_OUTPUT" || return 1
