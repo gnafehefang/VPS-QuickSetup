@@ -861,9 +861,25 @@ summary_login_user() { # 仅为简单、可核对的密钥认证策略生成示�
   return 1
 }
 summary_accounts() {
-  local accounts u uid home file key_dump prints fingerprints fingerprint issues count uncertain=no
+  local accounts displayed="" entry u uid home sh file key_dump prints fingerprints fingerprint issues count uncertain=no
   accounts=$(getent passwd) && [[ -n "$accounts" ]] || { warn "账号清单读取失败, 不能判断是否存在其他账号"; return 1; }
-  printf '账号总数: %s\n' "$(awk 'NF{n++} END{print n+0}' <<<"$accounts")"
+  while IFS= read -r entry; do
+    [[ -n "$entry" ]] || continue
+    IFS=: read -r u _ uid _ _ home sh <<<"$entry"
+    case "${sh##*/}" in
+      nologin|false|sync|true)
+        if [[ ! "$uid" =~ ^0+$ ]]; then
+          [[ "$home" == /* && "$home" != / ]] || continue
+          [[ -s "$home/.ssh/authorized_keys" || -L "$home/.ssh/authorized_keys" \
+            || -s "$home/.ssh/authorized_keys2" || -L "$home/.ssh/authorized_keys2" ]] || continue
+        fi ;;
+    esac
+    displayed+="$entry"$'\n'
+  done <<<"$accounts"
+  displayed=${displayed%$'\n'}
+  printf '系统账号总数: %s\n' "$(awk 'NF{n++} END{print n+0}' <<<"$accounts")"
+  printf '登录及带公钥账号: %s\n' "$(awk 'NF{n++} END{print n+0}' <<<"$displayed")"
+  [[ -n "$displayed" ]] || return 0
   while IFS=: read -r u _ uid _ _ home _; do
     fingerprints=""; issues=no
     if [[ "$home" != /* || "$home" == / || -L "$home" || -L "$home/.ssh" ]]; then
@@ -900,7 +916,7 @@ summary_accounts() {
       done <<<"$fingerprints"
     fi
     if [[ "$uid" =~ ^0+$ && "$u" != root ]]; then err "$u 也是 UID 0 账号, 必须人工核查"; fi
-  done <<<"$accounts"
+  done <<<"$displayed"
   [[ "$uncertain" == no ]] || warn "+? 表示部分密钥来源未能读取或校验, 数量可能不完整"
   return 0
 }
