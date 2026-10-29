@@ -34,6 +34,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/gnafehefang/VPS-QuickSetup/m
 - SSH 配置统一写入 `/etc/ssh/sshd_config.d/00-quicksetup.conf`（必要时在主配置顶部补 `Include`），修改前备份到 `/root/quicksetup-backup/<时间>/`，`sshd -t` 校验失败自动回滚，不会重启 sshd。
 - 改端口时新旧端口并存，确认新端口能登录后才关旧端口。
 - SSH 重启 / 重载后检查服务状态和预期监听端口，通过后才清理快照、关闭旧防火墙入口；失败则恢复原配置并尝试重新启动，恢复失败时保留快照供人工处理。
+- 切换 `ssh.socket` 时同时备份和处理 Ubuntu 遗留的 `00-socket.conf` / `addresses.conf`，重新加载 systemd；失败时恢复文件和原 socket 启用、运行状态。
 - 禁用密码 / 禁用 root 前都会检查公钥并要求确认已测试登录。
 - **执行 7、8、关闭旧端口前，务必另开一个终端窗口测试登录成功，当前窗口不要关。**
 

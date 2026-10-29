@@ -20,6 +20,8 @@ make_ssh_fixture() {
   QS_CONF="$SSH_CONF_DIR/00-quicksetup.conf"
   SSHD_RUN_DIR="$dir/run"
   BACKUP_DIR="$dir/backups"
+  SSH_SERVICE_DROPIN="$dir/systemd/ssh.service.d/00-socket.conf"
+  SSH_SOCKET_DROPIN="$dir/systemd/ssh.socket.d/addresses.conf"
   mkdir -p "$SSH_CONF_DIR" || return 1
   printf 'Port 22\n' >"$MAIN_CONF"
   printf 'Port 22\n' >"$QS_CONF"
@@ -116,6 +118,7 @@ test_failed_restart_preserves_firewall_and_restores_config() (
   ssh_ports() { awk '$1 == "Port" {print $2}' "$QS_CONF"; }
   local restarts=0 deleted=no
   sshd_restart() { ((restarts+=1)); [[ "$restarts" -gt 1 ]]; }
+  systemctl() { ((restarts+=1)); return 0; }
   sshd_wait_ready() { return 0; }
   ufw() { [[ "$1" == delete ]] && deleted=yes; return 0; }
   if remove_old_ports 22 6090; then return 1; fi
@@ -131,6 +134,7 @@ test_missing_listener_rolls_back() (
   printf 'Port 6090\n' >"$QS_CONF"
   local checks=0 restarts=0
   sshd_restart() { ((restarts+=1)); return 0; }
+  systemctl() { ((restarts+=1)); return 0; }
   sshd_wait_ready() { ((checks+=1)); [[ "$checks" -gt 1 ]]; }
   if sshd_apply restart; then return 1; fi
   [[ "$restarts" == 2 ]] && grep -qx 'Port 22' "$QS_CONF"
@@ -144,8 +148,7 @@ test_failed_reload_rolls_back() (
   sshd_snapshot || return 1
   printf 'PasswordAuthentication no\n' >"$QS_CONF"
   local recovered=no
-  systemctl() { return 1; }
-  sshd_restart() { recovered=yes; }
+  systemctl() { [[ "$1" == reload ]] && return 1; recovered=yes; }
   sshd_wait_ready() { return 0; }
   if sshd_apply reload; then return 1; fi
   [[ "$recovered" == yes ]] && grep -qx 'Port 22' "$QS_CONF"
@@ -169,6 +172,77 @@ test_unready_service_is_rejected() (
   ss() { printf 'LISTEN\n'; }
   sleep() { :; }
   ! sshd_wait_ready ssh '22 6090'
+)
+
+mock_socket_systemctl() {
+  case "$1" in
+    is-enabled)
+      if [[ "$2" == ssh.socket ]]; then printf '%s\n' "$SOCKET_ENABLED"
+      else printf '%s\n' "$SERVICE_ENABLED"; fi ;;
+    is-active) [[ "$SOCKET_ACTIVE" == yes ]] ;;
+    disable)
+      if [[ "$*" == *ssh.socket ]]; then SOCKET_ENABLED=disabled
+        [[ "$*" == *--now* ]] && SOCKET_ACTIVE=no
+      else SERVICE_ENABLED=disabled; fi
+      return 0 ;;
+    enable)
+      if [[ "$*" == *ssh.socket ]]; then SOCKET_ENABLED=enabled; else SERVICE_ENABLED=enabled; fi ;;
+    start) SOCKET_ACTIVE=yes ;;
+    stop) SOCKET_ACTIVE=no ;;
+    daemon-reload) RELOADED=yes ;;
+    restart) [[ "$RELOADED" == yes ]] ;;
+  esac
+}
+
+test_socket_switch_removes_dropins_before_reload() (
+  make_ssh_fixture || return 1
+  mkdir -p "$(dirname "$SSH_SERVICE_DROPIN")" "$(dirname "$SSH_SOCKET_DROPIN")"
+  printf '[Unit]\nRequires=ssh.socket\n' >"$SSH_SERVICE_DROPIN"
+  printf '[Socket]\nListenStream=22222\n' >"$SSH_SOCKET_DROPIN"
+  ssh_svc() { printf 'ssh\n'; }
+  local SOCKET_ENABLED=enabled SOCKET_ACTIVE=yes SERVICE_ENABLED=disabled RELOADED=no
+  systemctl() {
+    if [[ "$1" == daemon-reload ]]; then
+      [[ ! -e "$SSH_SERVICE_DROPIN" && ! -e "$SSH_SOCKET_DROPIN" ]] || return 1
+    fi
+    mock_socket_systemctl "$@"
+  }
+  sshd_snapshot || return 1
+  sshd_restart || return 1
+  [[ "$SOCKET_ACTIVE" == no && "$SOCKET_ENABLED" == disabled && "$SERVICE_ENABLED" == enabled && "$RELOADED" == yes ]]
+)
+
+test_socket_switch_failure_restores_files_and_state() (
+  make_ssh_fixture || return 1
+  mkdir -p "$(dirname "$SSH_SERVICE_DROPIN")" "$(dirname "$SSH_SOCKET_DROPIN")"
+  printf '[Unit]\nRequires=ssh.socket\n' >"$SSH_SERVICE_DROPIN"
+  printf '[Socket]\nListenStream=22\n' >"$SSH_SOCKET_DROPIN"
+  sshd() { return 0; }
+  ssh_svc() { printf 'ssh\n'; }
+  ssh_ports() { printf '22\n'; }
+  sshd_wait_ready() { return 0; }
+  local SOCKET_ENABLED=enabled SOCKET_ACTIVE=yes SERVICE_ENABLED=disabled RELOADED=no restarts=0
+  systemctl() {
+    if [[ "$1" == restart ]]; then ((restarts+=1)); [[ "$restarts" -gt 1 ]]; return; fi
+    mock_socket_systemctl "$@"
+  }
+  sshd_snapshot || return 1
+  if sshd_apply restart; then return 1; fi
+  [[ "$SOCKET_ACTIVE" == yes && "$SOCKET_ENABLED" == enabled && "$SERVICE_ENABLED" == disabled ]] \
+    && grep -qx 'Requires=ssh.socket' "$SSH_SERVICE_DROPIN" \
+    && grep -qx 'ListenStream=22' "$SSH_SOCKET_DROPIN"
+)
+
+test_socket_disabled_but_dropin_present_still_switches() (
+  make_ssh_fixture || return 1
+  mkdir -p "$(dirname "$SSH_SERVICE_DROPIN")"
+  printf '[Unit]\nRequires=ssh.socket\n' >"$SSH_SERVICE_DROPIN"
+  ssh_svc() { printf 'ssh\n'; }
+  local SOCKET_ENABLED=disabled SOCKET_ACTIVE=no SERVICE_ENABLED=enabled RELOADED=no
+  systemctl() { mock_socket_systemctl "$@"; }
+  sshd_snapshot || return 1
+  sshd_restart || return 1
+  [[ "$RELOADED" == yes && ! -e "$SSH_SERVICE_DROPIN" ]]
 )
 
 passed=0

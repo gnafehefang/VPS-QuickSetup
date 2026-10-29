@@ -8,6 +8,8 @@ QS_CONF="/etc/ssh/sshd_config.d/00-quicksetup.conf"
 MAIN_CONF="/etc/ssh/sshd_config"
 SSH_CONF_DIR="/etc/ssh/sshd_config.d"
 SSHD_RUN_DIR="/run/sshd"
+SSH_SERVICE_DROPIN="/etc/systemd/system/ssh.service.d/00-socket.conf"
+SSH_SOCKET_DROPIN="/etc/systemd/system/ssh.socket.d/addresses.conf"
 F2B_JAIL="/etc/fail2ban/jail.d/sshd.local"
 SWAP_SYSCTL="/etc/sysctl.d/99-quicksetup-swap.conf"
 TCP_SYSCTL="/etc/sysctl.d/99-quicksetup-tcp.conf"
@@ -147,7 +149,7 @@ sshd_apply() { # sshd_apply restart|reload
     return 0
   fi
   err "SSH $action 或监听检查失败, 恢复原配置"
-  if sshd_restore && sshd_restart && sshd_wait_ready "$svc" "$(ssh_ports)"; then
+  if sshd_restore && sshd_socket_restore "$svc" && systemctl restart "$svc" && sshd_wait_ready "$svc" "$(ssh_ports)"; then
     sshd_discard_snapshot
     warn "已恢复原 SSH 配置, 未关闭旧防火墙入口"
   else
@@ -159,13 +161,61 @@ qs_set() { # qs_set Key "value"   (在 00-quicksetup.conf 里设置单值项)
   sed -i "/^[[:space:]]*$1[[:space:]]/Id" "$QS_CONF"
   echo "$1 $2" >>"$QS_CONF"
 }
+sshd_socket_snapshot() {
+  local svc="$1"
+  [[ -n "$SNAP" && -d "$SNAP" ]] || { err "切换 ssh.socket 前必须有 SSH 快照"; return 1; }
+  [[ -f "$SNAP/socket.saved" ]] && return 0
+  if [[ -e "$SSH_SERVICE_DROPIN" ]]; then
+    cp -a "$SSH_SERVICE_DROPIN" "$SNAP/service-dropin" && backup_file "$SSH_SERVICE_DROPIN" || return 1
+  fi
+  if [[ -e "$SSH_SOCKET_DROPIN" ]]; then
+    cp -a "$SSH_SOCKET_DROPIN" "$SNAP/socket-dropin" && backup_file "$SSH_SOCKET_DROPIN" || return 1
+  fi
+  systemctl is-enabled ssh.socket >"$SNAP/socket.enabled" 2>/dev/null || true
+  systemctl is-enabled "$svc" >"$SNAP/service.enabled" 2>/dev/null || true
+  if systemctl is-active --quiet ssh.socket; then echo yes >"$SNAP/socket.active"
+  else echo no >"$SNAP/socket.active"; fi
+  touch "$SNAP/socket.saved"
+}
+restore_unit_enablement() {
+  case "$2" in
+    enabled) systemctl enable "$1" >/dev/null 2>&1 ;;
+    enabled-runtime) systemctl enable --runtime "$1" >/dev/null 2>&1 ;;
+    disabled) systemctl disable "$1" >/dev/null 2>&1 ;;
+    *) return 0 ;;
+  esac
+}
+sshd_socket_restore() {
+  local svc="$1" src dst
+  [[ -f "$SNAP/socket.changed" ]] || return 0
+  [[ -f "$SNAP/socket.saved" ]] || return 1
+  for src in service-dropin socket-dropin; do
+    if [[ "$src" == service-dropin ]]; then dst="$SSH_SERVICE_DROPIN"; else dst="$SSH_SOCKET_DROPIN"; fi
+    if [[ -e "$SNAP/$src" ]]; then
+      mkdir -p "$(dirname "$dst")" && cp -a "$SNAP/$src" "$dst" || return 1
+    else rm -f -- "$dst" || return 1; fi
+  done
+  systemctl daemon-reload || return 1
+  restore_unit_enablement ssh.socket "$(cat "$SNAP/socket.enabled")" || return 1
+  restore_unit_enablement "$svc" "$(cat "$SNAP/service.enabled")" || return 1
+  if [[ "$(cat "$SNAP/socket.active")" == yes ]]; then systemctl start ssh.socket
+  else systemctl stop ssh.socket; fi
+}
 sshd_restart() {
-  local svc; svc=$(ssh_svc)
-  # Ubuntu 22.10+ 的 ssh.socket 会接管端口, 改为传统 ssh.service
-  if systemctl is-enabled ssh.socket >/dev/null 2>&1 || systemctl is-active ssh.socket >/dev/null 2>&1; then
+  local svc enabled active=no
+  svc=$(ssh_svc)
+  enabled=$(systemctl is-enabled ssh.socket 2>/dev/null) || true
+  systemctl is-active --quiet ssh.socket && active=yes
+  # Ubuntu 迁移遗留的 drop-in 也会重新拉起 socket, 必须一起处理。
+  if [[ "$enabled" == enabled || "$enabled" == enabled-runtime || "$active" == yes \
+        || -e "$SSH_SERVICE_DROPIN" || -e "$SSH_SOCKET_DROPIN" ]]; then
     info "检测到 ssh.socket, 切换为 ssh.service 管理端口"
-    systemctl disable --now ssh.socket >/dev/null 2>&1 || true
-    systemctl enable "$svc" >/dev/null 2>&1 || true
+    sshd_socket_snapshot "$svc" || return 1
+    touch "$SNAP/socket.changed" || return 1
+    systemctl disable --now ssh.socket || return 1
+    rm -f -- "$SSH_SERVICE_DROPIN" "$SSH_SOCKET_DROPIN" || return 1
+    systemctl daemon-reload || return 1
+    systemctl enable "$svc" || return 1
   fi
   systemctl restart "$svc"
 }
