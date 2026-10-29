@@ -299,24 +299,196 @@ test_key_directory_target_is_rejected_before_writes() (
   [[ ! -s "$KEY_TEST_LOG" && -d "$KEY_TEST_HOME/.ssh/authorized_keys" ]]
 )
 
-test_pubkey_step_propagates_writer_failure() (
+make_pubkey_step_fixture() {
   make_key_fixture || return 1
+  PUBKEY_TEST_ASKS=0
+  PUBKEY_TEST_REPLIES=()
+  PUBKEY_TEST_OUTPUT="$KEY_TEST_HOME/output"
+  PUBKEY_TEST_PROMPTS="$KEY_TEST_HOME/prompts"
+  if [[ "${1:-}" == existing ]]; then
+    mkdir -p "$KEY_TEST_HOME/.ssh" || return 1
+    printf '%s' "$KEY_TEST_KEY" >"$KEY_TEST_HOME/.ssh/authorized_keys"
+    cp "$KEY_TEST_HOME/.ssh/authorized_keys" "$KEY_TEST_HOME/original_keys" || return 1
+  fi
+  ask() {
+    [[ "$PUBKEY_TEST_ASKS" -lt "${#PUBKEY_TEST_REPLIES[@]}" ]] \
+      || { printf 'unexpected prompt: %s\n' "$1" >&2; exit 99; }
+    printf '%s [%s]\n' "$1" "${2:-}" >>"$PUBKEY_TEST_PROMPTS"
+    REPLY="${PUBKEY_TEST_REPLIES[$PUBKEY_TEST_ASKS]:-${2:-}}"
+    ((PUBKEY_TEST_ASKS+=1))
+  }
+  skip() { printf 'SKIP %s\n' "$*" >>"$KEY_TEST_LOG"; }
+}
+
+test_pubkey_existing_valid_keys_default_or_explicit_skip() (
+  local choice
+  for choice in '' 0; do
+    (
+      make_pubkey_step_fixture existing || return 1
+      PUBKEY_TEST_REPLIES=(admin "$choice")
+      add_key_lines() { printf 'unexpected key write\n' >&2; exit 99; }
+      curl() { printf 'unexpected network request\n' >&2; exit 99; }
+      step_pubkey >"$PUBKEY_TEST_OUTPUT" || return 1
+      [[ "$PUBKEY_TEST_ASKS" == 2 ]] \
+        && grep -qxF '选择 [0]' "$PUBKEY_TEST_PROMPTS" \
+        && grep -qF '0) 保留现有公钥' "$PUBKEY_TEST_OUTPUT" \
+        && grep -qxF 'SKIP 保留 admin 的现有有效公钥' "$KEY_TEST_LOG" \
+        && cmp -s "$KEY_TEST_HOME/original_keys" "$KEY_TEST_HOME/.ssh/authorized_keys"
+    ) || return 1
+  done
+)
+
+test_pubkey_blank_input_retains_existing_valid_keys() (
   local method
   for method in 1 2; do
     (
+      make_pubkey_step_fixture existing || return 1
+      PUBKEY_TEST_REPLIES=(admin "$method" '')
+      add_key_lines() { printf 'unexpected key write\n' >&2; exit 99; }
+      curl() { printf 'unexpected network request\n' >&2; exit 99; }
+      step_pubkey >"$PUBKEY_TEST_OUTPUT" || return 1
+      [[ "$PUBKEY_TEST_ASKS" == 3 ]] \
+        && grep -qxF 'SKIP 保留 admin 的现有有效公钥' "$KEY_TEST_LOG" \
+        && cmp -s "$KEY_TEST_HOME/original_keys" "$KEY_TEST_HOME/.ssh/authorized_keys"
+    ) || return 1
+  done
+)
+
+test_pubkey_without_valid_keys_cannot_skip() (
+  local state method
+  for state in missing empty malformed; do
+    for method in 0 '' 1 2; do
+      (
+        make_pubkey_step_fixture || return 1
+        if [[ "$state" != missing ]]; then
+          mkdir -p "$KEY_TEST_HOME/.ssh" || return 1
+          : >"$KEY_TEST_HOME/.ssh/authorized_keys"
+          [[ "$state" != malformed ]] || printf 'not-a-public-key\n' >"$KEY_TEST_HOME/.ssh/authorized_keys"
+        fi
+        PUBKEY_TEST_REPLIES=(admin "$method" '')
+        add_key_lines() { printf 'unexpected key write\n' >&2; exit 99; }
+        curl() { printf 'unexpected network request\n' >&2; exit 99; }
+        if step_pubkey >"$PUBKEY_TEST_OUTPUT" 2>&1; then return 1; fi
+        [[ ! -s "$KEY_TEST_LOG" ]] \
+          && grep -qxF '选择 [1]' "$PUBKEY_TEST_PROMPTS" \
+          && grep -qF '没有有效公钥, 不能跳过' "$PUBKEY_TEST_OUTPUT" \
+          && ! grep -qF '0) 保留现有公钥' "$PUBKEY_TEST_OUTPUT"
+      ) || return 1
+    done
+  done
+)
+
+test_pubkey_skip_rechecks_keys_after_selection() (
+  local method
+  for method in 0 1 2; do
+    (
+      make_pubkey_step_fixture existing || return 1
       ask() {
         case "$1" in
           要给哪个用户添加公钥) REPLY='admin' ;;
-          选择) REPLY="$method" ;;
-          *) REPLY="$KEY_TEST_KEY" ;;
+          选择)
+            [[ "$2" == 0 ]] || exit 99
+            rm -f -- "$KEY_TEST_HOME/.ssh/authorized_keys" || exit 99
+            REPLY="$method" ;;
+          *) REPLY='' ;;
         esac
       }
-      curl() { printf '%s\n' "$KEY_TEST_KEY"; }
-      add_key_lines() { return 1; }
-      has_keys() { printf 'unexpected readback after write failure\n' >&2; exit 99; }
-      if step_pubkey >/dev/null; then return 1; fi
-      [[ ! -s "$KEY_TEST_LOG" ]]
+      if step_pubkey >"$PUBKEY_TEST_OUTPUT" 2>&1; then return 1; fi
+      [[ ! -s "$KEY_TEST_LOG" ]] && grep -qF '没有有效公钥, 不能跳过' "$PUBKEY_TEST_OUTPUT"
     ) || return 1
+  done
+)
+
+test_pubkey_skip_checks_selected_user_only() (
+  make_pubkey_step_fixture existing || return 1
+  PUBKEY_TEST_REPLIES=(root 1 '')
+  id() { [[ "$*" == root ]]; }
+  if step_pubkey >"$PUBKEY_TEST_OUTPUT" 2>&1; then return 1; fi
+  [[ ! -s "$KEY_TEST_LOG" ]] \
+    && grep -qF 'root 没有有效公钥, 不能跳过' "$PUBKEY_TEST_OUTPUT" \
+    && cmp -s "$KEY_TEST_HOME/original_keys" "$KEY_TEST_HOME/.ssh/authorized_keys"
+)
+
+test_pubkey_valid_input_succeeds_with_or_without_existing_keys() (
+  local state method
+  for state in missing existing; do
+    for method in 1 2; do
+      (
+        make_pubkey_step_fixture "$state" || return 1
+        ssh-keygen -q -t ed25519 -N '' -f "$KEY_TEST_HOME/another-key" || return 1
+        local new_key expected=1
+        new_key=$(<"$KEY_TEST_HOME/another-key.pub")
+        [[ "$state" != existing ]] || expected=2
+        if [[ "$method" == 1 ]]; then PUBKEY_TEST_REPLIES=(admin 1 "$new_key")
+        else PUBKEY_TEST_REPLIES=(admin 2 example-user); fi
+        curl() {
+          [[ "$*" == '-fsSL https://github.com/example-user.keys' ]] \
+            && printf '%s\n' "$new_key"
+        }
+        step_pubkey >"$PUBKEY_TEST_OUTPUT" || return 1
+        has_keys admin && grep -qxF "$new_key" "$KEY_TEST_HOME/.ssh/authorized_keys" \
+          && [[ "$(wc -l <"$KEY_TEST_HOME/.ssh/authorized_keys")" == "$expected" ]] \
+          && grep -qxF 'admin 的 authorized_keys 有效' "$KEY_TEST_LOG" \
+          && { [[ "$state" != existing ]] || grep -qxF "$KEY_TEST_KEY" "$KEY_TEST_HOME/.ssh/authorized_keys"; }
+      ) || return 1
+    done
+  done
+)
+
+test_pubkey_nonempty_invalid_input_fails_with_existing_keys() (
+  local method
+  for method in 1 2; do
+    (
+      make_pubkey_step_fixture existing || return 1
+      PUBKEY_TEST_REPLIES=(admin "$method" not-a-public-key)
+      curl() { printf 'not-a-public-key\n'; }
+      if step_pubkey >"$PUBKEY_TEST_OUTPUT" 2>&1; then return 1; fi
+      [[ ! -s "$KEY_TEST_LOG" ]] \
+        && cmp -s "$KEY_TEST_HOME/original_keys" "$KEY_TEST_HOME/.ssh/authorized_keys"
+    ) || return 1
+  done
+)
+
+test_pubkey_github_failure_or_empty_result_is_not_skip() (
+  local result
+  for result in failure empty; do
+    (
+      make_pubkey_step_fixture existing || return 1
+      PUBKEY_TEST_REPLIES=(admin 2 example-user)
+      curl() { [[ "$result" == empty ]]; }
+      add_key_lines() { printf 'unexpected key write\n' >&2; exit 99; }
+      if step_pubkey >"$PUBKEY_TEST_OUTPUT" 2>&1; then return 1; fi
+      [[ ! -s "$KEY_TEST_LOG" ]] \
+        && cmp -s "$KEY_TEST_HOME/original_keys" "$KEY_TEST_HOME/.ssh/authorized_keys"
+    ) || return 1
+  done
+)
+
+test_pubkey_step_propagates_writer_failure() (
+  make_key_fixture || return 1
+  local state method
+  for state in missing existing; do
+    for method in 1 2; do
+      (
+        local checks=0
+        ask() {
+          case "$1" in
+            要给哪个用户添加公钥) REPLY='admin' ;;
+            选择) REPLY="$method" ;;
+            *) REPLY="$KEY_TEST_KEY" ;;
+          esac
+        }
+        curl() { printf '%s\n' "$KEY_TEST_KEY"; }
+        add_key_lines() { return 1; }
+        has_keys() {
+          ((checks+=1))
+          [[ "$checks" == 1 ]] || { printf 'unexpected readback after write failure\n' >&2; exit 99; }
+          [[ "$state" == existing ]]
+        }
+        if step_pubkey >/dev/null; then return 1; fi
+        [[ "$checks" == 1 && ! -s "$KEY_TEST_LOG" ]]
+      ) || return 1
+    done
   done
 )
 
