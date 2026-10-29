@@ -6,6 +6,8 @@ set -o pipefail
 SCRIPT_URL="https://raw.githubusercontent.com/gnafehefang/VPS-QuickSetup/main/setup.sh"
 QS_CONF="/etc/ssh/sshd_config.d/00-quicksetup.conf"
 MAIN_CONF="/etc/ssh/sshd_config"
+SSH_CONF_DIR="/etc/ssh/sshd_config.d"
+SSHD_RUN_DIR="/run/sshd"
 F2B_JAIL="/etc/fail2ban/jail.d/sshd.local"
 SWAP_SYSCTL="/etc/sysctl.d/99-quicksetup-swap.conf"
 TCP_SYSCTL="/etc/sysctl.d/99-quicksetup-tcp.conf"
@@ -79,8 +81,8 @@ apt_install() { # apt_install pkg...
 ssh_svc() {
   if systemctl list-unit-files ssh.service >/dev/null 2>&1 && systemctl cat ssh.service >/dev/null 2>&1; then echo ssh; else echo sshd; fi
 }
-sshd_val() { mkdir -p /run/sshd; sshd -T 2>/dev/null | awk -v k="$1" '$1==k{print $2; exit}'; }
-ssh_ports() { mkdir -p /run/sshd; sshd -T 2>/dev/null | awk '$1=="port"{print $2}' | sort -un; }
+sshd_val() { mkdir -p "$SSHD_RUN_DIR"; sshd -T 2>/dev/null | awk -v k="$1" '$1==k{print $2; exit}'; }
+ssh_ports() { mkdir -p "$SSHD_RUN_DIR"; sshd -T 2>/dev/null | awk '$1=="port"{print $2}' | sort -un; }
 
 backup_file() {
   [[ -e "$1" ]] || return 0
@@ -88,7 +90,7 @@ backup_file() {
   cp -a "$1" "$BACKUP_DIR/$(echo "$1" | tr '/' '_')"
 }
 ensure_include() {
-  mkdir -p /etc/ssh/sshd_config.d
+  mkdir -p "$SSH_CONF_DIR"
   if ! grep -Eq '^[[:space:]]*Include[[:space:]]+/etc/ssh/sshd_config\.d/\*\.conf' "$MAIN_CONF"; then
     backup_file "$MAIN_CONF"
     sed -i '1i Include /etc/ssh/sshd_config.d/*.conf' "$MAIN_CONF"
@@ -100,17 +102,58 @@ ensure_include() {
 SNAP=""
 sshd_snapshot() {
   SNAP=$(mktemp -d)
-  cp -a /etc/ssh/sshd_config "$SNAP/main"
-  cp -a /etc/ssh/sshd_config.d "$SNAP/d"
+  cp -a "$MAIN_CONF" "$SNAP/main"
+  cp -a "$SSH_CONF_DIR" "$SNAP/d"
   backup_file "$MAIN_CONF"; backup_file "$QS_CONF"
 }
+sshd_discard_snapshot() {
+  [[ -n "$SNAP" ]] || return 0
+  rm -rf -- "$SNAP" || return 1
+  SNAP=""
+}
+sshd_restore() {
+  cp -a "$SNAP/main" "$MAIN_CONF" || return 1
+  rm -rf -- "$SSH_CONF_DIR" && cp -a "$SNAP/d" "$SSH_CONF_DIR"
+}
 sshd_validate_or_rollback() {
-  mkdir -p /run/sshd
-  if sshd -t; then rm -rf "$SNAP"; return 0; fi
+  mkdir -p "$SSHD_RUN_DIR" || return 1
+  if sshd -t; then return 0; fi
   err "sshd 配置校验失败, 回滚"
-  cp -a "$SNAP/main" /etc/ssh/sshd_config
-  rm -rf /etc/ssh/sshd_config.d && cp -a "$SNAP/d" /etc/ssh/sshd_config.d
-  rm -rf "$SNAP"; return 1
+  if sshd_restore; then sshd_discard_snapshot
+  else err "恢复失败, 请保留当前连接并检查快照: $SNAP"; fi
+  return 1
+}
+sshd_wait_ready() { # sshd_wait_ready service "port ..."
+  local svc="$1" ports="$2" attempt p ready
+  [[ -n "$ports" ]] || return 1
+  for attempt in 1 2 3 4 5; do
+    ready=yes
+    systemctl is-active --quiet "$svc" || ready=no
+    for p in $ports; do ss -ltnH "( sport = :$p )" | grep -q . || ready=no; done
+    [[ "$ready" == yes ]] && return 0
+    sleep 1
+  done
+  return 1
+}
+sshd_apply() { # sshd_apply restart|reload
+  local action="$1" svc ports activated=no
+  sshd_validate_or_rollback || return 1
+  svc=$(ssh_svc)
+  ports=$(ssh_ports) && [[ -n "$ports" ]] || { err "无法读取预期 SSH 端口"; sshd_restore; return 1; }
+  if [[ "$action" == restart ]]; then sshd_restart && activated=yes
+  else systemctl reload "$svc" && activated=yes; fi
+  if [[ "$activated" == yes ]] && sshd_wait_ready "$svc" "$ports"; then
+    sshd_discard_snapshot
+    return 0
+  fi
+  err "SSH $action 或监听检查失败, 恢复原配置"
+  if sshd_restore && sshd_restart && sshd_wait_ready "$svc" "$(ssh_ports)"; then
+    sshd_discard_snapshot
+    warn "已恢复原 SSH 配置, 未关闭旧防火墙入口"
+  else
+    err "自动恢复未完成, 请保留当前连接并检查快照: $SNAP"
+  fi
+  return 1
 }
 qs_set() { # qs_set Key "value"   (在 00-quicksetup.conf 里设置单值项)
   sed -i "/^[[:space:]]*$1[[:space:]]/Id" "$QS_CONF"
@@ -227,9 +270,8 @@ remove_old_ports() { # remove_old_ports "p1 p2" keep
   [[ -n "$keep" && " $olds " != *" $keep "* ]] || { err "保留端口不能为空或同时属于旧端口"; return 1; }
   sshd_snapshot; ensure_include
   sed -i '/^[[:space:]]*Port[[:space:]]/Id' "$QS_CONF"; echo "Port $keep" >>"$QS_CONF"
-  sshd_validate_or_rollback || return 1
-  sshd_restart
-  if command -v ufw >/dev/null && ufw status | grep -q "Status: active"; then
+  sshd_apply restart || return 1
+  if command -v ufw >/dev/null && LC_ALL=C ufw status | grep -q "Status: active"; then
     for p in $olds; do ufw delete allow "$p/tcp" >/dev/null 2>&1; ufw delete allow "$p" >/dev/null 2>&1; done
     [[ " $olds " == *" 22 "* ]] && ufw delete allow OpenSSH >/dev/null 2>&1
   fi
@@ -255,17 +297,14 @@ step_port() { # step_port [defer]
   sshd_snapshot; ensure_include
   # 注释掉其他位置的 Port, 统一由 00-quicksetup.conf 管理
   local f
-  for f in "$MAIN_CONF" /etc/ssh/sshd_config.d/*.conf; do
+  for f in "$MAIN_CONF" "$SSH_CONF_DIR"/*.conf; do
     [[ -f "$f" && "$f" != "$QS_CONF" ]] || continue
     grep -Eq '^[[:space:]]*Port[[:space:]]' "$f" && sed -i -E 's/^([[:space:]]*Port[[:space:]])/#\1/I' "$f"
   done
   sed -i '/^[[:space:]]*Port[[:space:]]/Id' "$QS_CONF"
   for p in $olds $new; do echo "Port $p" >>"$QS_CONF"; done
-  sshd_validate_or_rollback || return 1
-  sshd_restart
-  sleep 1
-  if ss -ltnH "( sport = :$new )" | grep -q .; then ok "sshd 已在 $new 监听 (过渡期同时保留: ${olds:-无})"
-  else err "sshd 没有监听 $new, 请检查"; return 1; fi
+  sshd_apply restart || return 1
+  ok "sshd 已在 $new 监听 (过渡期同时保留: ${olds:-无})"
   SELECTED_SSH_PORT="$new"
   f2b_refresh
   [[ -z "$olds" ]] && return 0
@@ -351,8 +390,8 @@ step_nopass() {
   qs_set PubkeyAuthentication yes
   qs_set PasswordAuthentication no
   qs_set KbdInteractiveAuthentication no
-  sshd_validate_or_rollback || return 1
-  systemctl reload "$(ssh_svc)" && ok "已禁用密码登录 (仅允许密钥)"
+  sshd_apply reload || return 1
+  ok "已禁用密码登录 (仅允许密钥)"
 }
 
 # ---------- 8. 禁用 root 登录 ----------
@@ -369,8 +408,8 @@ step_noroot() {
   sshd_snapshot; ensure_include
   qs_set PermitRootLogin no
   qs_set AllowUsers "$u"
-  sshd_validate_or_rollback || return 1
-  systemctl reload "$(ssh_svc)" && ok "已禁用 root 登录, 只允许 $u"
+  sshd_apply reload || return 1
+  ok "已禁用 root 登录, 只允许 $u"
   if passwd -S root 2>/dev/null | awk '{exit !($2=="L")}'; then skip "root 密码已锁定"
   elif confirm "是否同时锁定 root 密码 (passwd -l root)?" y; then passwd -l root >/dev/null && ok "root 密码已锁定"; fi
 }
@@ -450,8 +489,8 @@ step_all() {
   warn "接下来会禁用密码登录、禁用 root、关闭旧端口。"
   warn "请先另开一个窗口测试:  ssh -p $port $u@$(public_ip)   并执行 sudo -i"
   if ! confirm "测试成功, 继续?" n; then warn "已停止。测试通过后可单独运行 7 / 8 / 4"; summary; return 0; fi
-  run_step "7. 禁用密码登录" step_nopass
-  run_step "8. 禁用 root 登录" step_noroot
+  run_step "7. 禁用密码登录" step_nopass || return 1
+  run_step "8. 禁用 root 登录" step_noroot || return 1
   if [[ -n "$PENDING_OLD_PORTS" ]]; then
     echo; run_step "关闭旧端口" remove_old_ports "$PENDING_OLD_PORTS" "$port"
   fi

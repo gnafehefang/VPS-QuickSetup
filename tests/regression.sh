@@ -3,12 +3,27 @@ set -o pipefail
 
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd) || exit 1
 source "$ROOT/setup.sh"
+TEST_TMP=$(mktemp -d) || exit 1
+trap 'command rm -rf -- "$TEST_TMP"' EXIT
 
 info() { :; }
 ok() { :; }
 skip() { :; }
 warn() { :; }
 err() { printf '%s\n' "$*" >&2; }
+
+make_ssh_fixture() {
+  local dir
+  dir=$(mktemp -d "$TEST_TMP/ssh.XXXXXX") || return 1
+  MAIN_CONF="$dir/sshd_config"
+  SSH_CONF_DIR="$dir/sshd_config.d"
+  QS_CONF="$SSH_CONF_DIR/00-quicksetup.conf"
+  SSHD_RUN_DIR="$dir/run"
+  BACKUP_DIR="$dir/backups"
+  mkdir -p "$SSH_CONF_DIR" || return 1
+  printf 'Port 22\n' >"$MAIN_CONF"
+  printf 'Port 22\n' >"$QS_CONF"
+}
 
 test_all_keeps_selected_lower_port() (
   step_update() { :; }
@@ -91,6 +106,69 @@ test_ufw_allows_all_ports_before_enable() (
 test_run_step_preserves_failure() (
   fails() { return 1; }
   ! run_step failure fails >/dev/null
+)
+
+test_failed_restart_preserves_firewall_and_restores_config() (
+  make_ssh_fixture || return 1
+  ensure_include() { :; }
+  sshd() { return 0; }
+  ssh_svc() { printf 'ssh\n'; }
+  ssh_ports() { awk '$1 == "Port" {print $2}' "$QS_CONF"; }
+  local restarts=0 deleted=no
+  sshd_restart() { ((restarts+=1)); [[ "$restarts" -gt 1 ]]; }
+  sshd_wait_ready() { return 0; }
+  ufw() { [[ "$1" == delete ]] && deleted=yes; return 0; }
+  if remove_old_ports 22 6090; then return 1; fi
+  [[ "$deleted" == no && "$restarts" == 2 ]] && grep -qx 'Port 22' "$QS_CONF"
+)
+
+test_missing_listener_rolls_back() (
+  make_ssh_fixture || return 1
+  sshd() { return 0; }
+  ssh_svc() { printf 'ssh\n'; }
+  ssh_ports() { printf '22\n'; }
+  sshd_snapshot || return 1
+  printf 'Port 6090\n' >"$QS_CONF"
+  local checks=0 restarts=0
+  sshd_restart() { ((restarts+=1)); return 0; }
+  sshd_wait_ready() { ((checks+=1)); [[ "$checks" -gt 1 ]]; }
+  if sshd_apply restart; then return 1; fi
+  [[ "$restarts" == 2 ]] && grep -qx 'Port 22' "$QS_CONF"
+)
+
+test_failed_reload_rolls_back() (
+  make_ssh_fixture || return 1
+  sshd() { return 0; }
+  ssh_svc() { printf 'ssh\n'; }
+  ssh_ports() { printf '22\n'; }
+  sshd_snapshot || return 1
+  printf 'PasswordAuthentication no\n' >"$QS_CONF"
+  local recovered=no
+  systemctl() { return 1; }
+  sshd_restart() { recovered=yes; }
+  sshd_wait_ready() { return 0; }
+  if sshd_apply reload; then return 1; fi
+  [[ "$recovered" == yes ]] && grep -qx 'Port 22' "$QS_CONF"
+)
+
+test_successful_apply_discards_snapshot_after_health_check() (
+  make_ssh_fixture || return 1
+  sshd() { return 0; }
+  ssh_svc() { printf 'ssh\n'; }
+  ssh_ports() { printf '22\n'; }
+  sshd_snapshot || return 1
+  local saved="$SNAP" checked=no
+  sshd_restart() { return 0; }
+  sshd_wait_ready() { [[ -d "$saved" ]] || return 1; checked=yes; }
+  sshd_apply restart || return 1
+  [[ "$checked" == yes && -z "$SNAP" && ! -e "$saved" ]]
+)
+
+test_unready_service_is_rejected() (
+  systemctl() { return 1; }
+  ss() { printf 'LISTEN\n'; }
+  sleep() { :; }
+  ! sshd_wait_ready ssh '22 6090'
 )
 
 passed=0
