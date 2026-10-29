@@ -488,9 +488,9 @@ admin_login_ready() {
   local user="${1:-}" uid groups
   [[ -n "$user" && "$user" != root ]] || { err "未确认非 root 管理员, 请先完成菜单 4"; return 1; }
   uid=$(id -u "$user") && [[ "$uid" =~ ^[0-9]+$ && "$uid" -ne 0 ]] && has_keys "$user" \
-    || { err "管理员 $user 不存在、UID 无效或没有有效公钥, 停止 ALL"; return 1; }
+    || { err "管理员 $user 不存在、UID 无效或没有有效公钥, 停止后续操作"; return 1; }
   groups=$(id -nG "$user") && [[ " $groups " == *' sudo '* ]] \
-    || { err "管理员 $user 不在 sudo 组, 停止 ALL"; return 1; }
+    || { err "管理员 $user 不在 sudo 组, 停止后续操作"; return 1; }
 }
 
 # ---------- 5. 修改 SSH 端口 ----------
@@ -618,7 +618,32 @@ step_fail2ban() {
 }
 
 # ---------- 10. 禁用密码登录 ----------
-step_nopass() {
+ssh_login_test_port() {
+  local ports port _client_ip _client_port _server_ip server_port
+  ports=$(ssh_ports) && [[ -n "$ports" ]] || { err "无法确认 SSH 端口, 停止登录测试"; return 1; }
+  ports=$(tr '\n' ' ' <<<"$ports")
+  read -r _client_ip _client_port _server_ip server_port <<<"${SSH_CONNECTION:-}"
+  for port in "${SELECTED_SSH_PORT:-}" "${server_port:-}" $ports; do
+    if [[ "$port" =~ ^[1-9][0-9]{0,4}$ && "$port" -le 65535 && " $ports " == *" $port "* ]]; then
+      printf '%s\n' "$port"; return 0
+    fi
+  done
+  err "没有可用的 SSH 测试端口"; return 1
+}
+confirm_admin_login() { # user port [本轮已确认的 user port]
+  local user="$1" port="$2" ip
+  admin_login_ready "$user" || return 1
+  if [[ "$user" == "${3:-}" && "$port" == "${4:-}" ]]; then
+    info "沿用本轮已确认的 $user / 端口 $port 密钥登录与 sudo 测试"
+    return 0
+  fi
+  ip=$(public_ip)
+  [[ -n "$ip" && "$ip" != '<服务器IP>' ]] || { err "无法确定服务器地址, 请核对网络后重新测试"; return 1; }
+  warn "请另开窗口测试:  ssh -o PreferredAuthentications=publickey -p $port $user@$ip   并执行 sudo -i"
+  confirm "$user 已用密钥登录该端口并 sudo 成功, 继续?" n || { warn "已取消"; return 1; }
+}
+step_nopass() { # [本轮已确认的 user port]; 单独运行不复用登录确认
+  local tested_user="${1:-}" tested_port="${2:-}"
   if [[ "$(sshd_val passwordauthentication)" == no && "$(sshd_val kbdinteractiveauthentication)" == no \
         && "$(sshd_val pubkeyauthentication)" == yes ]]; then
     sshd_verify_policy PubkeyAuthentication yes PasswordAuthentication no KbdInteractiveAuthentication no || return 1
@@ -626,7 +651,13 @@ step_nopass() {
   local users; users=$(login_users_with_keys | tr '\n' ' ')
   [[ -z "$users" ]] && { err "没有任何用户配置了有效公钥, 拒绝禁用密码登录 (先用菜单 3)"; return 1; }
   info "已配置公钥的用户: $users"
-  confirm "你确认已经用密钥成功登录过吗?" n || { warn "已取消"; return 1; }
+  if [[ -n "$tested_user" && -n "$tested_port" ]]; then
+    local port; port=$(ssh_login_test_port) || return 1
+    [[ "$port" == "$tested_port" ]] || { err "SSH 目标端口已变化, 请重新测试后再禁用密码登录"; return 1; }
+    confirm_admin_login "$tested_user" "$port" "$tested_user" "$tested_port" || return 1
+  else
+    confirm "你确认已经用密钥成功登录过吗?" n || { warn "已取消"; return 1; }
+  fi
   sshd_begin_change || return 1
   if ! { qs_set PubkeyAuthentication yes && qs_set PasswordAuthentication no && qs_set KbdInteractiveAuthentication no; }; then
     sshd_abort_change; return 1
@@ -636,7 +667,7 @@ step_nopass() {
 }
 
 # ---------- 11. 禁用 root 登录 ----------
-step_noroot() {
+step_noroot() { # [本轮已确认的 user port]; 换用户或端口必须重新确认
   local cands; cands=$(sudo_users_with_keys | tr '\n' ' '); cands="${cands% }"
   [[ -z "$cands" ]] && { err "没有带公钥的 sudo 用户, 拒绝禁用 root (先用菜单 4)"; return 1; }
   local def="${ADMIN_USER:-${cands%% *}}"
@@ -649,8 +680,8 @@ step_noroot() {
   info "可用的 sudo 用户: $cands"
   ask "保留登录的用户 (将写入 AllowUsers)" "$def"; local u="$REPLY"
   [[ " $cands " == *" $u "* ]] || { err "$u 不是带公钥的 sudo 用户"; return 1; }
-  warn "请另开窗口测试:  ssh -p $(ssh_ports | head -1) $u@<服务器IP>  然后执行 sudo -i"
-  confirm "$u 密钥登录并 sudo 成功了吗?" n || { warn "已取消"; return 1; }
+  local port; port=$(ssh_login_test_port) || return 1
+  confirm_admin_login "$u" "$port" "${1:-}" "${2:-}" || return 1
   sshd_begin_change || return 1
   if ! { qs_set PermitRootLogin no && qs_set AllowUsers "$u"; }; then sshd_abort_change; return 1; fi
   sshd_apply reload PermitRootLogin no AllowUsers "$u" || return 1
@@ -786,10 +817,9 @@ step_all() {
   admin_login_ready "$u" || { ADMIN_USER=""; return 1; }
   echo
   warn "接下来会禁用密码登录、禁用 root、关闭旧端口。"
-  warn "请先另开一个窗口测试:  ssh -p $port $u@$(public_ip)   并执行 sudo -i"
-  if ! confirm "测试成功, 继续?" n; then warn "已停止。测试通过后可单独运行 10 / 11 / 5"; summary; return 0; fi
-  run_step "10. 禁用密码登录" step_nopass || return 1
-  run_step "11. 禁用 root 登录" step_noroot || return 1
+  if ! confirm_admin_login "$u" "$port"; then warn "已停止。测试通过后可单独运行 10 / 11 / 5"; summary; return 0; fi
+  run_step "10. 禁用密码登录" step_nopass "$u" "$port" || return 1
+  run_step "11. 禁用 root 登录" step_noroot "$u" "$port" || return 1
   if [[ -n "$PENDING_OLD_PORTS" ]]; then
     echo; run_step "关闭旧端口" remove_old_ports "$PENDING_OLD_PORTS" "$port"
   fi

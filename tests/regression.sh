@@ -513,6 +513,17 @@ make_noroot_fixture() {
   NOROOT_TEST_CALLS=''
   NOROOT_TEST_CANDS='admin'
   NOROOT_TEST_VERIFY_FAIL=no
+  SELECTED_SSH_PORT=''
+  SSH_CONNECTION=''
+  public_ip() { printf '192.0.2.1\n'; }
+  id() {
+    case "$1" in
+      -u) printf '1000\n' ;;
+      -nG) printf 'admin sudo\n' ;;
+      *) return 1 ;;
+    esac
+  }
+  has_keys() { return 0; }
   sudo_users_with_keys() { printf '%s\n' "$NOROOT_TEST_CANDS"; }
   sshd_val() {
     case "$1" in
@@ -567,6 +578,93 @@ test_noroot_existing_root_ban_requires_keyed_admin() (
   NOROOT_TEST_CANDS=''
   if step_noroot; then return 1; fi
   [[ -z "$NOROOT_TEST_CALLS" ]]
+)
+
+test_noroot_reuses_only_matching_login_confirmation() (
+  local state
+  for state in matching other-user other-port standalone; do
+    (
+      make_noroot_fixture
+      SELECTED_SSH_PORT=6090
+      ssh_ports() { printf '22\n6090\n'; }
+      local warnings=''
+      warn() { warnings+="$*"; }
+      case "$state" in
+        matching) step_noroot admin 6090 || return 1 ;;
+        other-user) step_noroot other 6090 || return 1 ;;
+        other-port) step_noroot admin 22 || return 1 ;;
+        standalone) step_noroot || return 1 ;;
+      esac
+      if [[ "$state" == matching ]]; then
+        [[ "$NOROOT_TEST_CALLS" != *'confirm;'* && -z "$warnings" ]]
+      else
+        [[ "$NOROOT_TEST_CALLS" == *'confirm;'* \
+          && "$warnings" == *'-p 6090 admin@192.0.2.1'* \
+          && "$warnings" == *'PreferredAuthentications=publickey'* \
+          && "$warnings" != *'<服务器IP>'* && "$warnings" != *'-p 22 '* ]]
+      fi
+    ) || return 1
+  done
+)
+
+test_noroot_cancelled_login_test_prevents_configuration() (
+  make_noroot_fixture
+  confirm() { NOROOT_TEST_CALLS+='confirm;'; return 1; }
+  if step_noroot; then return 1; fi
+  [[ "$NOROOT_TEST_CALLS" == 'ask;confirm;' ]]
+)
+
+test_noroot_unknown_ip_does_not_show_placeholder_or_change_policy() (
+  make_noroot_fixture
+  public_ip() { printf '<服务器IP>\n'; }
+  local output
+  output=$(step_noroot 2>&1) && return 1
+  [[ "$output" == *'无法确定服务器地址'* && "$output" != *'ssh -'* ]]
+)
+
+test_login_port_prefers_selected_then_connection_then_configured() (
+  ssh_ports() { printf '22\n6090\n'; }
+  SSH_CONNECTION='198.51.100.1 55555 192.0.2.1 6090'
+  SELECTED_SSH_PORT=22
+  [[ "$(ssh_login_test_port)" == 22 ]] || return 1
+  SELECTED_SSH_PORT=22222
+  [[ "$(ssh_login_test_port)" == 6090 ]] || return 1
+  SSH_CONNECTION=''
+  [[ "$(ssh_login_test_port)" == 22 ]] || return 1
+  ssh_ports() { return 1; }
+  ! ssh_login_test_port
+)
+
+test_nopass_confirmation_reuse_rechecks_admin_and_port() (
+  local state
+  for state in matching changed-port missing-key standalone; do
+    (
+      local calls='' confirms=0
+      sshd_val() { printf 'yes\n'; }
+      login_users_with_keys() { printf 'admin\n'; }
+      ssh_ports() { printf '22\n6090\n'; }
+      SELECTED_SSH_PORT=6090
+      id() {
+        case "$1" in -u) printf '1000\n' ;; -nG) printf 'admin sudo\n' ;; *) return 1 ;; esac
+      }
+      has_keys() { [[ "$state" != missing-key ]]; }
+      confirm() { ((confirms+=1)); return 0; }
+      sshd_begin_change() { calls+='begin;'; }
+      qs_set() { calls+="set:$*;"; }
+      sshd_apply() { calls+="apply:$*;"; }
+      case "$state" in
+        matching) step_nopass admin 6090 || return 1 ;;
+        standalone) step_nopass || return 1 ;;
+        changed-port) if step_nopass admin 22; then return 1; fi ;;
+        missing-key) if step_nopass admin 6090; then return 1; fi ;;
+      esac
+      case "$state" in
+        matching) [[ "$calls" == begin\;* && "$confirms" == 0 ]] ;;
+        standalone) [[ "$calls" == begin\;* && "$confirms" == 1 ]] ;;
+        *) [[ -z "$calls" && "$confirms" == 0 ]] ;;
+      esac
+    ) || return 1
+  done
 )
 
 make_summary_login_fixture() {
@@ -1136,6 +1234,8 @@ test_menu_dispatch_matches_safe_order() (
 test_all_numbers_and_pause_match_safe_order() (
   local calls='' labels='' port_mode=''
   mock_setup_steps
+  step_nopass() { calls+='10 '; [[ "$*" == 'admin 6090' ]]; }
+  step_noroot() { calls+='11 '; [[ "$*" == 'admin 6090' ]]; }
   public_ip() { printf '192.0.2.1\n'; }
   confirm() { calls+='pause '; [[ "$2" == n ]]; }
   run_step() { labels+="${1%%.*} "; shift; "$@"; }
