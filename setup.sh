@@ -220,9 +220,11 @@ step_admin() {
 
 # ---------- 4. 修改 SSH 端口 ----------
 PENDING_OLD_PORTS=""
+SELECTED_SSH_PORT=""
 remove_old_ports() { # remove_old_ports "p1 p2" keep
   local olds="$1" keep="$2" p
   [[ -z "$olds" ]] && return 0
+  [[ -n "$keep" && " $olds " != *" $keep "* ]] || { err "保留端口不能为空或同时属于旧端口"; return 1; }
   sshd_snapshot; ensure_include
   sed -i '/^[[:space:]]*Port[[:space:]]/Id' "$QS_CONF"; echo "Port $keep" >>"$QS_CONF"
   sshd_validate_or_rollback || return 1
@@ -237,12 +239,13 @@ remove_old_ports() { # remove_old_ports "p1 p2" keep
 }
 step_port() { # step_port [defer]
   local defer="${1:-}" cur new p olds=""
+  SELECTED_SSH_PORT=""
   cur=$(ssh_ports | tr '\n' ' '); cur="${cur% }"
   info "当前 SSH 端口: $cur"
   ask "新的 SSH 端口" "$DEFAULT_PORT"; new="$REPLY"
   [[ "$new" =~ ^[0-9]+$ && "$new" -ge 1 && "$new" -le 65535 ]] || { err "端口不合法"; return 1; }
   for p in $cur; do [[ "$p" != "$new" ]] && olds="$olds $p"; done; olds="${olds# }"
-  if [[ "$cur" == "$new" ]]; then skip "SSH 已经只监听 $new"; return 0; fi
+  if [[ "$cur" == "$new" ]]; then SELECTED_SSH_PORT="$new"; skip "SSH 已经只监听 $new"; return 0; fi
   if ss -ltnH "( sport = :$new )" 2>/dev/null | grep -q . && [[ " $cur " != *" $new "* ]]; then err "端口 $new 已被其他程序占用"; return 1; fi
   if command -v ufw >/dev/null && ufw status | grep -q "Status: active"; then ufw allow "$new/tcp" comment SSH >/dev/null && ok "UFW 已放行 $new/tcp"; fi
   sshd_snapshot; ensure_include
@@ -259,6 +262,7 @@ step_port() { # step_port [defer]
   sleep 1
   if ss -ltnH "( sport = :$new )" | grep -q .; then ok "sshd 已在 $new 监听 (过渡期同时保留: ${olds:-无})"
   else err "sshd 没有监听 $new, 请检查"; return 1; fi
+  SELECTED_SSH_PORT="$new"
   f2b_refresh
   [[ -z "$olds" ]] && return 0
   PENDING_OLD_PORTS="$olds"
@@ -416,6 +420,8 @@ EOT
 # ---------- 12. ALL ----------
 run_step() { echo; echo "${c_blu}========== $1 ==========${c_off}"; shift; "$@" || warn "该步骤未完成, 继续下一步"; }
 step_all() {
+  PENDING_OLD_PORTS=""
+  SELECTED_SSH_PORT=""
   run_step "1. 系统更新" step_update
   run_step "9. 时区" step_tz
   run_step "2. 添加公钥" step_pubkey
@@ -425,7 +431,8 @@ step_all() {
   run_step "6. fail2ban" step_fail2ban
   run_step "10. swap" step_swap
   run_step "11. TCP 调优" step_tcp
-  local port u; port=$(ssh_ports | tail -1); u="${ADMIN_USER:-root}"
+  local port="$SELECTED_SSH_PORT" u="${ADMIN_USER:-root}"
+  [[ -n "$port" ]] || { err "未确认目标 SSH 端口, 停止后续收紧操作"; return 1; }
   echo
   warn "接下来会禁用密码登录、禁用 root、关闭旧端口。"
   warn "请先另开一个窗口测试:  ssh -p $port $u@$(public_ip)   并执行 sudo -i"
@@ -512,4 +519,6 @@ main() {
     esac
   done
 }
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi
