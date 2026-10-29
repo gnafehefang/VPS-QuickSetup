@@ -31,11 +31,12 @@ bash <(curl -fsSL https://raw.githubusercontent.com/gnafehefang/VPS-QuickSetup/m
 
 ## 防锁死设计
 
-- SSH 配置统一写入 `/etc/ssh/sshd_config.d/00-quicksetup.conf`（必要时在主配置顶部补 `Include`），修改前备份到 `/root/quicksetup-backup/<时间>/`，`sshd -t` 校验失败自动回滚，不会重启 sshd。
+- SSH 配置统一写入 `/etc/ssh/sshd_config.d/00-quicksetup.conf`，在主配置第一行直接 `Include` 该文件以保证单值配置优先级；保留原有其他配置。修改前备份到 `/root/quicksetup-backup/<时间>/`，`sshd -t` 校验失败自动回滚，不会重启 sshd。
 - 改端口时新旧端口并存，确认新端口能登录后才关旧端口。
 - SSH 重启 / 重载后检查服务状态和预期监听端口，通过后才清理快照、关闭旧防火墙入口；失败则恢复原配置并尝试重新启动，恢复失败时保留快照供人工处理。
 - 切换 `ssh.socket` 时同时备份和处理 Ubuntu 遗留的 `00-socket.conf` / `addresses.conf`，重新加载 systemd；失败时恢复文件和原 socket 启用、运行状态。
 - 禁用密码 / 禁用 root 前都会检查公钥并要求确认已测试登录。
+- 收紧登录前用 `sshd -T` 和当前连接参数对应的 `sshd -T -C` 核对 root、带公钥用户的有效策略；若存在 `Match` 或非标准 `Include`，拒绝自动收紧，需先人工审查。已有其他 `AllowUsers` 条目导致“只允许所选用户”无法成立时也会回滚。
 - **执行 7、8、关闭旧端口前，务必另开一个终端窗口测试登录成功，当前窗口不要关。**
 
 ## 生成的文件
@@ -48,3 +49,12 @@ bash <(curl -fsSL https://raw.githubusercontent.com/gnafehefang/VPS-QuickSetup/m
 - `/swapfile`
 
 脚本里不包含任何密钥或密码，公钥在运行时输入。
+
+## 回归测试
+
+```bash
+bash -n setup.sh
+bash tests/regression.sh
+```
+
+测试通过临时目录和命令模拟验证失败处理，不安装软件、不改动真实 SSH / UFW / systemd 配置。实际 VPS 上仍需另开窗口测试登录。

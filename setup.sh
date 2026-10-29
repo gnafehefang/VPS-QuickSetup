@@ -92,13 +92,18 @@ backup_file() {
   cp -a "$1" "$BACKUP_DIR/$(echo "$1" | tr '/' '_')"
 }
 ensure_include() {
-  mkdir -p "$SSH_CONF_DIR"
-  if ! grep -Eq '^[[:space:]]*Include[[:space:]]+/etc/ssh/sshd_config\.d/\*\.conf' "$MAIN_CONF"; then
-    backup_file "$MAIN_CONF"
-    sed -i '1i Include /etc/ssh/sshd_config.d/*.conf' "$MAIN_CONF"
-    info "已在 $MAIN_CONF 顶部加入 Include"
+  mkdir -p "$SSH_CONF_DIR" || return 1
+  [[ -f "$QS_CONF" ]] || { echo "# 由 VPS-QuickSetup 管理" >"$QS_CONF" && chmod 644 "$QS_CONF"; } || return 1
+  local tmp
+  tmp=$(mktemp "$MAIN_CONF.quicksetup.XXXXXX") || return 1
+  if ! { cp -a "$MAIN_CONF" "$tmp" && awk -v managed="$QS_CONF" '
+    BEGIN { print "Include " managed }
+    tolower($1) == "include" && $2 == managed && (NF == 2 || $3 ~ /^#/) { next }
+    { print }
+  ' "$MAIN_CONF" >"$tmp" && mv -f -- "$tmp" "$MAIN_CONF"; }; then
+    rm -f -- "$tmp"
+    return 1
   fi
-  [[ -f "$QS_CONF" ]] || { echo "# 由 VPS-QuickSetup 管理" >"$QS_CONF"; chmod 644 "$QS_CONF"; }
 }
 # 先备份 -> 修改 -> sshd -t 校验 -> 失败回滚
 SNAP=""
@@ -137,9 +142,47 @@ sshd_wait_ready() { # sshd_wait_ready service "port ..."
   done
   return 1
 }
-sshd_apply() { # sshd_apply restart|reload
+sshd_policy_layout_supported() {
+  local f
+  for f in "$MAIN_CONF" "$SSH_CONF_DIR"/*.conf; do
+    [[ -f "$f" ]] || continue
+    awk -v managed="$QS_CONF" -v pattern="$SSH_CONF_DIR/*.conf" '
+      tolower($1) == "match" { exit 1 }
+      tolower($1) == "include" {
+        if (($2 != managed && $2 != pattern) || (NF > 2 && $3 !~ /^#/)) exit 1
+      }
+    ' "$f" || { err "存在 Match 或非标准 Include, 无法保证所有连接的安全策略, 请人工检查: $f"; return 1; }
+  done
+}
+sshd_expect_settings() { # sshd_expect_settings dump Key value ...
+  local dump="$1" key expected actual
+  shift
+  while (( $# >= 2 )); do
+    key="${1,,}"; expected="$2"; shift 2
+    actual=$(awk -v k="$key" '$1 == k {for (i=2; i<=NF; i++) print $i}' <<<"$dump" | sort -u | paste -sd' ' -)
+    [[ "$actual" == "$expected" ]] || { err "SSH 有效配置不符合预期: $key=$actual (预期 $expected)"; return 1; }
+  done
+}
+sshd_verify_policy() { # sshd_verify_policy Key value ...
+  [[ $# -gt 0 ]] || return 0
+  sshd_policy_layout_supported || return 1
+  local dump u client_ip client_port server_ip server_port
+  dump=$(sshd -T) && sshd_expect_settings "$dump" "$@" || return 1
+  read -r client_ip client_port server_ip server_port <<<"${SSH_CONNECTION:-127.0.0.1 0 127.0.0.1 22}"
+  for u in root $(login_users_with_keys); do
+    dump=$(sshd -T -C "user=$u,addr=$client_ip,host=$client_ip,laddr=$server_ip,lport=$server_port") \
+      && sshd_expect_settings "$dump" "$@" || return 1
+  done
+}
+sshd_apply() { # sshd_apply restart|reload [Key value ...]
   local action="$1" svc ports activated=no
+  shift
   sshd_validate_or_rollback || return 1
+  if ! sshd_verify_policy "$@"; then
+    err "安全策略未生效, 恢复原配置且不重载 SSH"
+    if sshd_restore; then sshd_discard_snapshot; fi
+    return 1
+  fi
   svc=$(ssh_svc)
   ports=$(ssh_ports) && [[ -n "$ports" ]] || { err "无法读取预期 SSH 端口"; sshd_restore; return 1; }
   if [[ "$action" == restart ]]; then sshd_restart && activated=yes
@@ -430,7 +473,9 @@ step_fail2ban() {
 
 # ---------- 7. 禁用密码登录 ----------
 step_nopass() {
-  if [[ "$(sshd_val passwordauthentication)" == no && "$(sshd_val kbdinteractiveauthentication)" == no ]]; then
+  if [[ "$(sshd_val passwordauthentication)" == no && "$(sshd_val kbdinteractiveauthentication)" == no \
+        && "$(sshd_val pubkeyauthentication)" == yes ]]; then
+    sshd_verify_policy PubkeyAuthentication yes PasswordAuthentication no KbdInteractiveAuthentication no || return 1
     skip "密码登录已禁用"; return 0; fi
   local users; users=$(login_users_with_keys | tr '\n' ' ')
   [[ -z "$users" ]] && { err "没有任何用户配置了有效公钥, 拒绝禁用密码登录 (先用菜单 2)"; return 1; }
@@ -440,13 +485,16 @@ step_nopass() {
   qs_set PubkeyAuthentication yes
   qs_set PasswordAuthentication no
   qs_set KbdInteractiveAuthentication no
-  sshd_apply reload || return 1
+  sshd_apply reload PubkeyAuthentication yes PasswordAuthentication no KbdInteractiveAuthentication no || return 1
   ok "已禁用密码登录 (仅允许密钥)"
 }
 
 # ---------- 8. 禁用 root 登录 ----------
 step_noroot() {
-  if [[ "$(sshd_val permitrootlogin)" == no ]]; then skip "root 登录已禁用"; return 0; fi
+  if [[ "$(sshd_val permitrootlogin)" == no ]]; then
+    sshd_verify_policy PermitRootLogin no || return 1
+    skip "root 登录已禁用"; return 0
+  fi
   local cands; cands=$(sudo_users_with_keys | tr '\n' ' '); cands="${cands% }"
   [[ -z "$cands" ]] && { err "没有带公钥的 sudo 用户, 拒绝禁用 root (先用菜单 3)"; return 1; }
   local def="${ADMIN_USER:-${cands%% *}}"
@@ -458,7 +506,7 @@ step_noroot() {
   sshd_snapshot; ensure_include
   qs_set PermitRootLogin no
   qs_set AllowUsers "$u"
-  sshd_apply reload || return 1
+  sshd_apply reload PermitRootLogin no AllowUsers "$u" || return 1
   ok "已禁用 root 登录, 只允许 $u"
   if passwd -S root 2>/dev/null | awk '{exit !($2=="L")}'; then skip "root 密码已锁定"
   elif confirm "是否同时锁定 root 密码 (passwd -l root)?" y; then passwd -l root >/dev/null && ok "root 密码已锁定"; fi

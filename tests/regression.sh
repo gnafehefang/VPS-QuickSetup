@@ -245,6 +245,55 @@ test_socket_disabled_but_dropin_present_still_switches() (
   [[ "$RELOADED" == yes && ! -e "$SSH_SERVICE_DROPIN" ]]
 )
 
+test_managed_include_is_first_and_idempotent() (
+  make_ssh_fixture || return 1
+  printf 'PasswordAuthentication yes\nInclude %s/*.conf\n' "$SSH_CONF_DIR" >"$MAIN_CONF"
+  ensure_include && ensure_include || return 1
+  [[ "$(head -n 1 "$MAIN_CONF")" == "Include $QS_CONF" ]] \
+    && [[ "$(grep -cFx "Include $QS_CONF" "$MAIN_CONF")" == 1 ]] \
+    && grep -qxF "Include $SSH_CONF_DIR/*.conf" "$MAIN_CONF"
+)
+
+test_effective_policy_conflict_rolls_back_before_reload() (
+  make_ssh_fixture || return 1
+  sshd() { [[ "$1" == -T ]] && printf 'passwordauthentication yes\n'; return 0; }
+  systemctl() { printf 'unexpected service operation\n' >&2; exit 99; }
+  sshd_snapshot || return 1
+  printf 'PasswordAuthentication no\n' >"$QS_CONF"
+  if sshd_apply reload PasswordAuthentication no; then return 1; fi
+  grep -qx 'Port 22' "$QS_CONF"
+)
+
+test_match_policy_requires_manual_review() (
+  make_ssh_fixture || return 1
+  printf 'Match Address 192.0.2.0/24\n    PasswordAuthentication yes\n' >>"$MAIN_CONF"
+  ! sshd_verify_policy PasswordAuthentication no
+)
+
+test_external_include_requires_manual_review() (
+  make_ssh_fixture || return 1
+  printf 'Include /opt/custom-ssh.conf\n' >>"$MAIN_CONF"
+  ! sshd_verify_policy PasswordAuthentication no
+)
+
+test_connection_context_is_verified() (
+  make_ssh_fixture || return 1
+  login_users_with_keys() { printf 'admin\n'; }
+  sshd() {
+    if [[ "$*" == *user=admin* ]]; then printf 'passwordauthentication yes\n'
+    else printf 'passwordauthentication no\n'; fi
+  }
+  ! sshd_verify_policy PasswordAuthentication no
+)
+
+test_additional_allowusers_is_rejected() (
+  ! sshd_expect_settings $'permitrootlogin no\nallowusers admin\nallowusers other' PermitRootLogin no AllowUsers admin
+)
+
+test_duplicate_allowusers_does_not_cause_false_conflict() (
+  sshd_expect_settings $'permitrootlogin no\nallowusers admin\nallowusers admin' PermitRootLogin no AllowUsers admin
+)
+
 passed=0
 failed=0
 while IFS= read -r test_name; do
