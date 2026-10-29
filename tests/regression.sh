@@ -44,6 +44,55 @@ test_rejects_removing_kept_port() (
   ! remove_old_ports '22 6090' 6090
 )
 
+test_ufw_rejects_missing_ports() (
+  apt_install() { return 0; }
+  ssh_ports() { return 1; }
+  ufw() { printf 'unexpected UFW change\n' >&2; exit 99; }
+  ! step_ufw
+)
+
+test_ufw_rejects_empty_ports() (
+  apt_install() { return 0; }
+  ssh_ports() { return 0; }
+  ufw() { printf 'unexpected UFW change\n' >&2; exit 99; }
+  ! step_ufw
+)
+
+test_ufw_stops_after_failed_allow() (
+  apt_install() { return 0; }
+  ssh_ports() { printf '22\n6090\n'; }
+  local enabled=no
+  ufw() {
+    case "$1" in
+      status) printf 'Status: inactive\n' ;;
+      allow) [[ "$2" != 6090/tcp ]] ;;
+      --force) enabled=yes ;;
+    esac
+  }
+  if step_ufw; then return 1; fi
+  [[ "$enabled" == no ]]
+)
+
+test_ufw_allows_all_ports_before_enable() (
+  apt_install() { return 0; }
+  ssh_ports() { printf '22\n6090\n'; }
+  local allowed='' enabled=no
+  ufw() {
+    case "$1" in
+      status) printf 'Status: inactive\n' ;;
+      allow) allowed+=" $2" ;;
+      --force) [[ "$allowed" == ' 22/tcp 6090/tcp' ]] || return 1; enabled=yes ;;
+    esac
+  }
+  step_ufw >/dev/null || return 1
+  [[ "$enabled" == yes ]]
+)
+
+test_run_step_preserves_failure() (
+  fails() { return 1; }
+  ! run_step failure fails >/dev/null
+)
+
 passed=0
 failed=0
 while IFS= read -r test_name; do

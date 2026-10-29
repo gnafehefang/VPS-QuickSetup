@@ -247,7 +247,11 @@ step_port() { # step_port [defer]
   for p in $cur; do [[ "$p" != "$new" ]] && olds="$olds $p"; done; olds="${olds# }"
   if [[ "$cur" == "$new" ]]; then SELECTED_SSH_PORT="$new"; skip "SSH 已经只监听 $new"; return 0; fi
   if ss -ltnH "( sport = :$new )" 2>/dev/null | grep -q . && [[ " $cur " != *" $new "* ]]; then err "端口 $new 已被其他程序占用"; return 1; fi
-  if command -v ufw >/dev/null && ufw status | grep -q "Status: active"; then ufw allow "$new/tcp" comment SSH >/dev/null && ok "UFW 已放行 $new/tcp"; fi
+  if command -v ufw >/dev/null; then
+    local status
+    status=$(LC_ALL=C ufw status) || { err "无法读取 UFW 状态, 停止修改 SSH 端口"; return 1; }
+    if [[ "$status" == *"Status: active"* ]]; then ufw_allow_ssh "$new" || return 1; fi
+  fi
   sshd_snapshot; ensure_include
   # 注释掉其他位置的 Port, 统一由 00-quicksetup.conf 管理
   local f
@@ -276,17 +280,26 @@ step_port() { # step_port [defer]
 }
 
 # ---------- 5. UFW ----------
+ufw_allow_ssh() {
+  LC_ALL=C ufw allow "$1/tcp" comment SSH >/dev/null || { err "UFW 放行 $1/tcp 失败"; return 1; }
+  ok "UFW 已放行 $1/tcp"
+}
 step_ufw() {
-  apt_install ufw
-  local p
-  for p in $(ssh_ports); do
-    if ufw status | grep -qE "^$p/tcp[[:space:]]"; then skip "UFW 已放行 $p/tcp"
-    else ufw allow "$p/tcp" comment SSH >/dev/null && ok "UFW 放行 SSH 端口 $p/tcp"; fi
+  apt_install ufw || { err "UFW 安装失败"; return 1; }
+  local ports status p
+  ports=$(ssh_ports) && [[ -n "$ports" ]] || { err "无法确认 SSH 端口, 拒绝启用 UFW"; return 1; }
+  for p in $ports; do
+    [[ "$p" =~ ^[1-9][0-9]{0,4}$ && "$p" -le 65535 ]] || { err "无效 SSH 端口: $p"; return 1; }
   done
-  if ufw status | grep -q "Status: active"; then skip "UFW 已启用"
+  status=$(LC_ALL=C ufw status) || { err "无法读取 UFW 状态"; return 1; }
+  # UFW 自身会跳过重复规则, 不把同端口的 DENY 或受限规则误判成已放行。
+  for p in $ports; do ufw_allow_ssh "$p" || return 1; done
+  if [[ "$status" == *"Status: active"* ]]; then skip "UFW 已启用"
   else
-    ufw default deny incoming >/dev/null; ufw default allow outgoing >/dev/null
-    ufw --force enable && ok "UFW 已启用"
+    ufw default deny incoming >/dev/null || return 1
+    ufw default allow outgoing >/dev/null || return 1
+    ufw --force enable || { err "UFW 启用失败"; return 1; }
+    ok "UFW 已启用"
   fi
   ufw status
 }
@@ -418,7 +431,7 @@ EOT
 }
 
 # ---------- 12. ALL ----------
-run_step() { echo; echo "${c_blu}========== $1 ==========${c_off}"; shift; "$@" || warn "该步骤未完成, 继续下一步"; }
+run_step() { echo; echo "${c_blu}========== $1 ==========${c_off}"; shift; "$@" || { warn "该步骤未完成"; return 1; }; }
 step_all() {
   PENDING_OLD_PORTS=""
   SELECTED_SSH_PORT=""
@@ -426,8 +439,8 @@ step_all() {
   run_step "9. 时区" step_tz
   run_step "2. 添加公钥" step_pubkey
   run_step "3. 创建管理员" step_admin
-  run_step "4. 修改 SSH 端口" step_port defer
-  run_step "5. UFW" step_ufw
+  run_step "4. 修改 SSH 端口" step_port defer || return 1
+  run_step "5. UFW" step_ufw || return 1
   run_step "6. fail2ban" step_fail2ban
   run_step "10. swap" step_swap
   run_step "11. TCP 调优" step_tcp
