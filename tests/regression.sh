@@ -2,7 +2,7 @@
 set -o pipefail
 
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd) || exit 1
-source "$ROOT/setup.sh"
+source "$ROOT/setup.sh" || exit 1
 TEST_TMP=$(mktemp -d) || exit 1
 export TMPDIR="$TEST_TMP"
 trap 'command rm -rf -- "$TEST_TMP"' EXIT

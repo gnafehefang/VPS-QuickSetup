@@ -10,6 +10,47 @@
 bash <(curl -fsSL https://raw.githubusercontent.com/gnafehefang/VPS-QuickSetup/main/setup.sh)
 ```
 
+远程入口需要 `bash`、`curl`、`tar` 和 gzip 解压支持。入口先把 `main` 分支的完整仓库归档下载到临时目录，再运行归档内的入口和全部模块，不逐个下载浮动分支上的功能文件；下载、解压或模块预检失败时不进入菜单。退出后清理临时目录，非 root 通过 sudo 重新运行时仍使用同一套文件。
+
+本地运行需保留完整仓库（`setup.sh` 和 `scripts/`），不要只复制入口文件；入口根据自身位置寻找模块，不依赖当前工作目录，也不会在本地文件缺失时悄悄下载另一版覆盖：
+
+```bash
+bash /path/to/VPS-QuickSetup/setup.sh
+```
+
+## 项目结构
+
+```text
+setup.sh                       # 加载预检、本地/远程启动入口
+scripts/
+  common.sh                    # 默认配置、提示、输入、提权和通用备份
+  ssh-common.sh                # SSH 配置校验、事务快照、回滚及 socket 切换
+  keys-common.sh               # 公钥校验、写入和账号查询
+  login-check.sh               # 登录测试端口选择和确认
+  01-update.sh                 # 系统更新
+  02-timezone.sh               # 时区
+  03-pubkey.sh                 # 添加公钥
+  04-admin.sh                  # 创建管理员
+  05-ssh-port.sh               # SSH 端口与旧端口关闭
+  06-ufw.sh                    # 防火墙
+  07-fail2ban.sh               # fail2ban 及端口同步
+  08-swap.sh                   # swap
+  09-tcp.sh                    # TCP 调优
+  10-ssh-password.sh           # 禁用密码登录
+  11-ssh-root.sh               # 禁用 root 登录
+  12-hostname.sh               # hostname
+  13-all.sh                    # ALL 安全顺序编排
+  14-status.sh                 # 当前状态和脱敏账号报告
+  menu.sh                      # 菜单和选项分发
+tests/
+  regression.sh                # 功能与失败处理回归
+  bootstrap.sh                 # 模块加载、远程启动、提权与清理回归
+```
+
+功能文件通过入口在同一个 Bash 进程中 `source` 加载，不单独执行，以保留本轮管理员、目标端口、旧端口和登录确认等状态。加载前对已登记模块逐个检查文件和 Bash 语法，全部通过才加载；不执行目录内未登记的脚本。菜单编号、防锁死检查、备份及回滚行为保持不变。
+
+维护已有功能时修改对应模块；新增功能时，在 `setup.sh` 的预检清单和显式加载清单中登记，再接入 `scripts/menu.sh`。需加入 ALL 时同时更新 `scripts/13-all.sh` 的安全顺序和相关回归测试。显式 source 路径也供 ShellCheck 跟踪跨文件依赖。
+
 ## 菜单
 
 | 选项 | 功能 | 说明 |
@@ -89,8 +130,13 @@ sudo last -Fai | head -50
 ## 回归测试
 
 ```bash
-bash -n setup.sh
+for file in setup.sh scripts/*.sh tests/*.sh; do
+  bash -n "$file" || exit 1
+done
 bash tests/regression.sh
+bash tests/bootstrap.sh
+# 可选, 需已安装 ShellCheck; -x 沿入口检查被 source 的模块
+shellcheck -x --severity=warning setup.sh tests/*.sh
 ```
 
-测试通过临时目录和命令模拟验证失败处理，不安装软件、不改动真实 SSH / UFW / systemd 配置。实际 VPS 上仍需另开窗口测试登录。
+测试通过临时目录和命令模拟验证失败处理，不安装软件、不改动真实 SSH / UFW / systemd 配置。启动测试使用本地生成的归档和模拟 curl / sudo，不下载或执行远程代码。实际 VPS 上仍需另开窗口测试登录。
