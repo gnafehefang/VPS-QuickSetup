@@ -25,8 +25,9 @@ bash <(curl -fsSL https://raw.githubusercontent.com/gnafehefang/VPS-QuickSetup/m
 | 9 | TCP 调优 | 开启 BBR + fq + `tcp_mtu_probing=1` |
 | 10 | 禁用密码登录 | 没有任何用户配置有效公钥时拒绝执行，并要求确认已测试密钥登录 |
 | 11 | 禁用 root 登录 | 需要一个带公钥的 sudo 用户；写入 `PermitRootLogin no` + `AllowUsers <用户>`，可选锁定 root 密码 |
-| 12 | ALL | 按安全顺序：1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → **暂停，另开窗口测试新端口 + admin 登录** → 10 → 11 → 关闭旧端口 |
-| 13 | 查看当前状态 | 端口、登录用户、UFW、fail2ban，并给出本机 `~/.ssh/config` 片段 |
+| 12 | 修改 hostname | 输入新主机名；回车默认 `Host` + 当天系统日期（`YYYYMMDD`），如 `Host20261029`；保留大小写，允许 1-63 位字母、数字和连字符，首尾不能是连字符 |
+| 13 | ALL | 按安全顺序：1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → **暂停，另开窗口测试新端口 + admin 登录** → 10 → 11 → 关闭旧端口 → 12 |
+| 14 | 查看当前状态 | 端口、登录用户、UFW、fail2ban，并给出本机 `~/.ssh/config` 片段 |
 | 0 | 退出 | |
 
 ## 防锁死设计
@@ -48,6 +49,9 @@ bash <(curl -fsSL https://raw.githubusercontent.com/gnafehefang/VPS-QuickSetup/m
 - `/etc/modules-load.d/quicksetup-bbr.conf`
 - `/etc/sudoers.d/90-<用户>`
 - `/swapfile`
+- `/etc/hostname`（更新静态和当前主机名）、`/etc/hosts`（维护一条带标记的本机解析记录，保留原有记录）
+
+修改 hostname 前会备份配置；设置或校验失败时尝试恢复。默认日期在进入该步骤时读取，按 VPS 当前时区计算，不是脚本发布时的固定日期。
 
 脚本里不包含任何密钥或密码，公钥在运行时输入。
 

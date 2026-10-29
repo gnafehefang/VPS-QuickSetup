@@ -33,6 +33,180 @@ test_timezone_step_uses_configured_default() (
   return 1
 )
 
+make_hostname_fixture() {
+  local dir
+  dir=$(mktemp -d "$TEST_TMP/hostname.XXXXXX") || return 1
+  HOSTNAME_FILE="$dir/hostname"
+  HOSTS_FILE="$dir/hosts"
+  BACKUP_DIR="$dir/backups"
+  HOSTNAME_RUNTIME=OldRuntime
+  HOSTNAME_STATIC=OldStatic
+  HOSTNAME_SET_CALLS=0
+  HOSTNAME_TEST_DAY=20261029
+  HOSTNAME_SET_FAIL=no
+  HOSTNAME_VERIFY_FAIL=no
+  printf '%s\n' "$HOSTNAME_STATIC" >"$HOSTNAME_FILE"
+  printf '127.0.0.1 localhost\n127.0.1.1 OldStatic alias # keep\n::1 localhost ip6-localhost\n' >"$HOSTS_FILE"
+  date() { [[ "$1" == +%Y%m%d ]] && printf '%s\n' "$HOSTNAME_TEST_DAY"; }
+  hostname() {
+    if [[ $# == 0 ]]; then printf '%s\n' "$HOSTNAME_RUNTIME"
+    else HOSTNAME_RUNTIME="$1"; fi
+  }
+  hostnamectl() {
+    case "$*" in
+      --static) printf '%s\n' "$HOSTNAME_STATIC" ;;
+      '--static --transient set-hostname '*)
+        ((HOSTNAME_SET_CALLS+=1))
+        HOSTNAME_STATIC="$4"; HOSTNAME_RUNTIME="$4"
+        printf '%s\n' "$HOSTNAME_STATIC" >"$HOSTNAME_FILE"
+        [[ "$HOSTNAME_VERIFY_FAIL" == yes ]] && HOSTNAME_RUNTIME=unexpected
+        [[ "$HOSTNAME_SET_FAIL" == no ]] ;;
+      '--static set-hostname '*)
+        HOSTNAME_STATIC="$3"
+        if [[ -n "$HOSTNAME_STATIC" ]]; then printf '%s\n' "$HOSTNAME_STATIC" >"$HOSTNAME_FILE"
+        else rm -f -- "$HOSTNAME_FILE"; fi ;;
+      *) printf 'unexpected hostnamectl: %s\n' "$*" >&2; return 1 ;;
+    esac
+  }
+}
+
+test_hostname_enter_uses_today_with_uppercase_prefix() (
+  make_hostname_fixture || return 1
+  TTY=$(mktemp) || return 1
+  printf '\n' >"$TTY"
+  step_hostname || return 1
+  [[ "$HOSTNAME_RUNTIME" == Host20261029 && "$HOSTNAME_STATIC" == Host20261029 ]] \
+    && grep -qx 'Host20261029' "$HOSTNAME_FILE" \
+    && grep -qx $'127.0.1.1\tHost20261029 # VPS-QuickSetup hostname' "$HOSTS_FILE"
+)
+
+test_hostname_default_date_is_read_for_each_run() (
+  make_hostname_fixture || return 1
+  TTY=$(mktemp) || return 1
+  printf '\n' >"$TTY"
+  step_hostname || return 1
+  HOSTNAME_TEST_DAY=20261030
+  step_hostname || return 1
+  [[ "$HOSTNAME_RUNTIME" == Host20261030 && "$HOSTNAME_STATIC" == Host20261030 ]]
+)
+
+test_hostname_custom_name_preserves_aliases_and_first_backup() (
+  make_hostname_fixture || return 1
+  local original_hosts
+  original_hosts=$(<"$HOSTS_FILE")
+  ask() { REPLY=My-VPS-01; }
+  step_hostname || return 1
+  ask() { REPLY=My-VPS-02; }
+  step_hostname || return 1
+  [[ "$HOSTNAME_RUNTIME" == My-VPS-02 && "$HOSTNAME_STATIC" == My-VPS-02 \
+    && "$(<"$BACKUP_DIR/${HOSTS_FILE//\//_}")" == "$original_hosts" ]] \
+    && grep -qx 'OldStatic' "$BACKUP_DIR/${HOSTNAME_FILE//\//_}" \
+    && grep -qx '127.0.1.1 OldStatic alias # keep' "$HOSTS_FILE" \
+    && grep -qx '::1 localhost ip6-localhost' "$HOSTS_FILE" \
+    && [[ "$(grep -c '# VPS-QuickSetup hostname$' "$HOSTS_FILE")" == 1 ]] \
+    && ! grep -q 'My-VPS-01' "$HOSTS_FILE"
+)
+
+test_hostname_repeat_is_idempotent() (
+  make_hostname_fixture || return 1
+  ask() { REPLY=My-VPS; }
+  step_hostname && step_hostname || return 1
+  [[ "$HOSTNAME_SET_CALLS" == 1 && "$(grep -c '# VPS-QuickSetup hostname$' "$HOSTS_FILE")" == 1 ]]
+)
+
+test_hostname_rejects_invalid_input_before_system_changes() (
+  make_hostname_fixture || return 1
+  hostnamectl() { printf 'unexpected hostname change\n' >&2; exit 99; }
+  backup_file() { printf 'unexpected backup\n' >&2; exit 99; }
+  local invalid long
+  printf -v long '%064d' 0
+  for invalid in '' '-bad' 'bad-' 'bad_name' 'two names' 'name.example' '$(id)' $'bad\nname' '主机' "$long"; do
+    ask() { REPLY="$invalid"; }
+    if step_hostname; then return 1; fi
+  done
+  [[ "$HOSTNAME_SET_CALLS" == 0 ]] && grep -qx 'OldStatic' "$HOSTNAME_FILE"
+)
+
+test_hostname_accepts_63_character_name() (
+  make_hostname_fixture || return 1
+  local long_name
+  printf -v long_name '%063d' 0
+  ask() { REPLY="$long_name"; }
+  step_hostname || return 1
+  [[ "$HOSTNAME_RUNTIME" == "$long_name" && ${#HOSTNAME_RUNTIME} == 63 ]]
+)
+
+test_hostname_backup_failure_prevents_changes() (
+  make_hostname_fixture || return 1
+  local original_hosts
+  original_hosts=$(<"$HOSTS_FILE")
+  ask() { REPLY=NewHost; }
+  backup_file() { return 1; }
+  if step_hostname; then return 1; fi
+  [[ "$HOSTNAME_SET_CALLS" == 0 && "$(<"$HOSTS_FILE")" == "$original_hosts" ]] \
+    && grep -qx 'OldStatic' "$HOSTNAME_FILE"
+)
+
+test_hostname_partial_failure_restores_static_runtime_and_hosts() (
+  make_hostname_fixture || return 1
+  local original_hosts
+  original_hosts=$(<"$HOSTS_FILE")
+  ask() { REPLY=NewHost; }
+  HOSTNAME_SET_FAIL=yes
+  if step_hostname; then return 1; fi
+  [[ "$HOSTNAME_STATIC" == OldStatic && "$HOSTNAME_RUNTIME" == OldRuntime \
+    && "$(<"$HOSTS_FILE")" == "$original_hosts" ]] && grep -qx 'OldStatic' "$HOSTNAME_FILE"
+)
+
+test_hostname_effective_value_mismatch_triggers_restore() (
+  make_hostname_fixture || return 1
+  ask() { REPLY=NewHost; }
+  HOSTNAME_VERIFY_FAIL=yes
+  if step_hostname; then return 1; fi
+  [[ "$HOSTNAME_STATIC" == OldStatic && "$HOSTNAME_RUNTIME" == OldRuntime ]] \
+    && ! grep -q '# VPS-QuickSetup hostname$' "$HOSTS_FILE"
+)
+
+test_hostname_hosts_write_failure_preserves_old_name() (
+  make_hostname_fixture || return 1
+  local original_hosts
+  original_hosts=$(<"$HOSTS_FILE")
+  ask() { REPLY=NewHost; }
+  cat() { [[ "$1" == */hosts.new ]] && return 1; command cat "$@"; }
+  if step_hostname; then return 1; fi
+  [[ "$HOSTNAME_SET_CALLS" == 0 && "$(<"$HOSTS_FILE")" == "$original_hosts" \
+    && "$HOSTNAME_STATIC" == OldStatic && "$HOSTNAME_RUNTIME" == OldRuntime ]]
+)
+
+test_hostname_restore_failure_does_not_skip_runtime_recovery() (
+  make_hostname_fixture || return 1
+  ask() { REPLY=NewHost; }
+  HOSTNAME_SET_FAIL=yes
+  cat() { [[ "$1" == */hosts ]] && return 1; command cat "$@"; }
+  if step_hostname; then return 1; fi
+  [[ "$HOSTNAME_STATIC" == OldStatic && "$HOSTNAME_RUNTIME" == OldRuntime ]]
+)
+
+test_hostname_staging_failure_prevents_changes() (
+  make_hostname_fixture || return 1
+  local original_hosts
+  original_hosts=$(<"$HOSTS_FILE")
+  ask() { REPLY=NewHost; }
+  awk() { return 1; }
+  if step_hostname; then return 1; fi
+  [[ "$HOSTNAME_SET_CALLS" == 0 && "$(<"$HOSTS_FILE")" == "$original_hosts" ]]
+)
+
+test_hostname_failure_restores_absent_static_hostname() (
+  make_hostname_fixture || return 1
+  HOSTNAME_STATIC=''
+  rm -f -- "$HOSTNAME_FILE"
+  ask() { REPLY=NewHost; }
+  HOSTNAME_SET_FAIL=yes
+  if step_hostname; then return 1; fi
+  [[ -z "$HOSTNAME_STATIC" && ! -e "$HOSTNAME_FILE" && "$HOSTNAME_RUNTIME" == OldRuntime ]]
+)
+
 mock_setup_steps() {
   step_update() { calls+='1 '; }
   step_tz() { calls+='2 '; }
@@ -45,7 +219,8 @@ mock_setup_steps() {
   step_tcp() { calls+='9 '; }
   step_nopass() { calls+='10 '; }
   step_noroot() { calls+='11 '; }
-  summary() { calls+='13 '; }
+  step_hostname() { calls+='12 '; }
+  summary() { calls+='14 '; }
 }
 
 test_menu_displays_safe_order() (
@@ -63,20 +238,21 @@ test_menu_displays_safe_order() (
     '9. TCP 调优 (BBR)' \
     '10. 禁用密码登录' \
     '11. 禁用 root 登录' \
-    '12. ALL (按安全顺序执行)' \
-    '13. 查看当前状态' \
+    '12. 修改 hostname' \
+    '13. ALL (按安全顺序执行)' \
+    '14. 查看当前状态' \
     '0. 退出')
   [[ "$actual" == "$expected" ]]
 )
 
 test_menu_dispatch_matches_safe_order() (
   mock_setup_steps
-  step_all() { calls+='12 '; }
+  step_all() { calls+='13 '; }
   need_root() { :; }
   check_os() { :; }
   menu() { :; }
   local choice
-  for choice in {1..13}; do
+  for choice in {1..14}; do
     (
       local calls='' asked=no port_mode=''
       ask() {
@@ -96,8 +272,8 @@ test_all_numbers_and_pause_match_safe_order() (
   run_step() { labels+="${1%%.*} "; shift; "$@"; }
   remove_old_ports() { calls+='close '; [[ "$1" == 22 && "$2" == 6090 ]]; }
   step_all >/dev/null || return 1
-  [[ "$calls" == '1 2 3 4 5 6 7 8 9 pause 10 11 close 13 ' \
-    && "$labels" == '1 2 3 4 5 6 7 8 9 10 11 关闭旧端口 ' \
+  [[ "$calls" == '1 2 3 4 5 6 7 8 9 pause 10 11 close 12 14 ' \
+    && "$labels" == '1 2 3 4 5 6 7 8 9 10 11 关闭旧端口 12 ' \
     && "$port_mode" == defer ]]
 )
 
@@ -109,7 +285,7 @@ test_all_cancel_preserves_login_and_old_ports() (
   warn() { warnings+="$*"; }
   remove_old_ports() { calls+='close '; }
   step_all >/dev/null || return 1
-  [[ "$calls" == '1 2 3 4 5 6 7 8 9 pause 13 ' \
+  [[ "$calls" == '1 2 3 4 5 6 7 8 9 pause 14 ' \
     && "$warnings" == *'10 / 11 / 5'* \
     && "$PENDING_OLD_PORTS" == 22 && "$port_mode" == defer ]]
 )
@@ -141,6 +317,7 @@ test_all_keeps_selected_lower_port() (
   step_tcp() { :; }
   step_nopass() { :; }
   step_noroot() { :; }
+  step_hostname() { :; }
   ssh_ports() { printf '6090\n22222\n'; }
   public_ip() { printf '192.0.2.1\n'; }
   confirm() { return 0; }

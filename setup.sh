@@ -13,6 +13,8 @@ SSH_SOCKET_DROPIN="/etc/systemd/system/ssh.socket.d/addresses.conf"
 F2B_JAIL="/etc/fail2ban/jail.d/sshd.local"
 SWAP_SYSCTL="/etc/sysctl.d/99-quicksetup-swap.conf"
 TCP_SYSCTL="/etc/sysctl.d/99-quicksetup-tcp.conf"
+HOSTNAME_FILE="/etc/hostname"
+HOSTS_FILE="/etc/hosts"
 BACKUP_DIR="/root/quicksetup-backup/$(date +%Y%m%d-%H%M%S)"
 DEFAULT_PORT=6090
 DEFAULT_TZ="Asia/Singapore"
@@ -623,7 +625,57 @@ EOT
   sysctl -q -p "$TCP_SYSCTL" && ok "已启用 BBR: $(sysctl -n net.ipv4.tcp_congestion_control) / $(sysctl -n net.core.default_qdisc)"
 }
 
-# ---------- 12. ALL ----------
+# ---------- 12. 修改 hostname ----------
+step_hostname() {
+  local day name cur static tmp
+  day=$(date +%Y%m%d) || { err "无法读取当前日期"; return 1; }
+  ask "新的 hostname" "Host$day"; name="$REPLY"
+  local LC_ALL=C
+  [[ ${#name} -le 63 && "$name" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$ ]] \
+    || { err "hostname 不合法: 请用 1-63 位英文字母、数字或连字符, 首尾不能是连字符"; return 1; }
+  cur=$(hostname) && static=$(hostnamectl --static) \
+    || { err "无法读取当前 hostname, 未修改配置"; return 1; }
+  [[ -f "$HOSTS_FILE" && ! -L "$HOSTS_FILE" && ! -L "$HOSTNAME_FILE" \
+      && ( ! -e "$HOSTNAME_FILE" || -f "$HOSTNAME_FILE" ) ]] \
+    || { err "hostname 或 hosts 文件类型异常, 请人工检查"; return 1; }
+  tmp=$(mktemp -d) || { err "无法创建 hostname 暂存目录"; return 1; }
+  # 只替换本脚本管理的解析记录, 保留原有地址、别名和注释。
+  if ! { cp -a "$HOSTS_FILE" "$tmp/hosts" && awk -v name="$name" '
+    $0 !~ /[[:space:]]# VPS-QuickSetup hostname$/ { print }
+    END { printf "127.0.1.1\t%s # VPS-QuickSetup hostname\n", name }
+  ' "$HOSTS_FILE" >"$tmp/hosts.new"; }; then
+    rm -rf -- "$tmp"; err "准备 hostname 配置失败, 未修改系统"; return 1
+  fi
+  if [[ "$cur" == "$name" && "$static" == "$name" ]] && cmp -s "$HOSTS_FILE" "$tmp/hosts.new"; then
+    rm -rf -- "$tmp"; skip "hostname 已是 $name"; return 0
+  fi
+  if ! { backup_file "$HOSTNAME_FILE" && backup_file "$HOSTS_FILE"; }; then
+    rm -rf -- "$tmp"; err "hostname 配置备份失败, 未修改系统"; return 1
+  fi
+  if ! cat "$tmp/hosts.new" >"$HOSTS_FILE"; then
+    cat "$tmp/hosts" >"$HOSTS_FILE" || err "hosts 恢复失败, 请检查备份: $BACKUP_DIR"
+    rm -rf -- "$tmp"; err "写入 hosts 失败, 未设置 hostname"; return 1
+  fi
+  # 显式选择 static/transient, 不让 pretty hostname 简化用户输入。
+  if hostnamectl --static --transient set-hostname "$name" \
+      && [[ "$(hostname)" == "$name" && "$(hostnamectl --static)" == "$name" ]]; then
+    rm -rf -- "$tmp"; ok "hostname 已设为 $name"; return 0
+  fi
+  err "设置或校验 hostname 失败, 尝试恢复原配置"
+  local restored=yes
+  cat "$tmp/hosts" >"$HOSTS_FILE" || restored=no
+  hostnamectl --static set-hostname "$static" || restored=no
+  hostname "$cur" || restored=no
+  if [[ "$restored" == yes ]]; then
+    warn "已恢复原 hostname 和 hosts"
+  else
+    err "自动恢复未完成, 请检查备份: $BACKUP_DIR"
+  fi
+  rm -rf -- "$tmp"
+  return 1
+}
+
+# ---------- 13. ALL ----------
 run_step() { echo; echo "${c_blu}========== $1 ==========${c_off}"; shift; "$@" || { warn "该步骤未完成"; return 1; }; }
 step_all() {
   PENDING_OLD_PORTS=""
@@ -648,6 +700,7 @@ step_all() {
   if [[ -n "$PENDING_OLD_PORTS" ]]; then
     echo; run_step "关闭旧端口" remove_old_ports "$PENDING_OLD_PORTS" "$port"
   fi
+  run_step "12. 修改 hostname" step_hostname || return 1
   summary
 }
 
@@ -702,8 +755,9 @@ ${c_grn}======= VPS-QuickSetup =======${c_off}
  9. TCP 调优 (BBR)
 10. 禁用密码登录
 11. 禁用 root 登录
-12. ALL (按安全顺序执行)
-13. 查看当前状态
+12. 修改 hostname
+13. ALL (按安全顺序执行)
+14. 查看当前状态
  0. 退出
 EOT
 }
@@ -719,8 +773,8 @@ main() {
     case "$REPLY" in
       1) step_update ;;  2) step_tz ;;      3) step_pubkey ;;  4) step_admin ;;
       5) step_port ;;    6) step_ufw ;;     7) step_fail2ban ;; 8) step_swap ;;
-      9) step_tcp ;;    10) step_nopass ;; 11) step_noroot ;; 12) step_all ;;
-      13) summary ;;     0|q|Q) echo "再见"; exit 0 ;;
+      9) step_tcp ;;    10) step_nopass ;; 11) step_noroot ;; 12) step_hostname ;;
+      13) step_all ;;   14) summary ;;     0|q|Q) echo "再见"; exit 0 ;;
       *) warn "无效选项" ;;
     esac
   done
