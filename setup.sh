@@ -87,9 +87,11 @@ sshd_val() { mkdir -p "$SSHD_RUN_DIR"; sshd -T 2>/dev/null | awk -v k="$1" '$1==
 ssh_ports() { mkdir -p "$SSHD_RUN_DIR"; sshd -T 2>/dev/null | awk '$1=="port"{print $2}' | sort -un; }
 
 backup_file() {
-  [[ -e "$1" ]] || return 0
-  mkdir -p "$BACKUP_DIR"
-  cp -a "$1" "$BACKUP_DIR/$(echo "$1" | tr '/' '_')"
+  [[ -e "$1" || -L "$1" ]] || return 0
+  mkdir -p "$BACKUP_DIR" || return 1
+  local dst="$BACKUP_DIR/${1//\//_}"
+  [[ -e "$dst" || -L "$dst" ]] && return 0
+  cp -a "$1" "$dst"
 }
 ensure_include() {
   mkdir -p "$SSH_CONF_DIR" || return 1
@@ -108,32 +110,78 @@ ensure_include() {
 # 先备份 -> 修改 -> sshd -t 校验 -> 失败回滚
 SNAP=""
 sshd_snapshot() {
-  SNAP=$(mktemp -d)
-  cp -a "$MAIN_CONF" "$SNAP/main"
-  cp -a "$SSH_CONF_DIR" "$SNAP/d"
-  backup_file "$MAIN_CONF"; backup_file "$QS_CONF"
+  [[ -z "$SNAP" ]] || { err "上次快照尚未清理, 请先检查: $SNAP"; return 1; }
+  [[ -f "$MAIN_CONF" && ! -L "$MAIN_CONF" && ! -L "$SSH_CONF_DIR" && ! -L "$QS_CONF" ]] \
+    || { err "SSH 配置不存在或受管路径是符号链接, 拒绝自动修改"; return 1; }
+  local dir failed=no
+  dir=$(mktemp -d) || { err "无法创建 SSH 快照目录"; return 1; }
+  cp -a "$MAIN_CONF" "$dir/main" || failed=yes
+  if [[ -d "$SSH_CONF_DIR" ]]; then cp -a "$SSH_CONF_DIR" "$dir/d" || failed=yes
+  elif [[ -e "$SSH_CONF_DIR" ]]; then failed=yes
+  else : >"$dir/d.absent" || failed=yes; fi
+  if [[ "$failed" == no ]] && backup_file "$MAIN_CONF" && backup_file "$QS_CONF" && touch "$dir/complete"; then
+    SNAP="$dir"
+    return 0
+  fi
+  err "SSH 备份不完整, 未修改配置"
+  rm -rf -- "$dir" || warn "临时快照清理失败: $dir"
+  return 1
 }
 sshd_discard_snapshot() {
   [[ -n "$SNAP" ]] || return 0
+  [[ -f "$SNAP/complete" ]] || { err "拒绝删除不完整快照: $SNAP"; return 1; }
   rm -rf -- "$SNAP" || return 1
   SNAP=""
 }
 sshd_restore() {
-  cp -a "$SNAP/main" "$MAIN_CONF" || return 1
-  rm -rf -- "$SSH_CONF_DIR" && cp -a "$SNAP/d" "$SSH_CONF_DIR"
+  [[ -n "$SNAP" && -f "$SNAP/complete" && -f "$SNAP/main" \
+      && ( -d "$SNAP/d" || -f "$SNAP/d.absent" ) && ! -L "$SSH_CONF_DIR" ]] \
+    || { err "快照不完整或目标路径异常, 不替换现有配置: $SNAP"; return 1; }
+  local stage
+  stage=$(mktemp -d "$(dirname "$SSH_CONF_DIR")/.quicksetup-restore.XXXXXX") || return 1
+  if ! cp -a "$SNAP/main" "$stage/main" \
+      || { [[ -d "$SNAP/d" ]] && ! cp -a "$SNAP/d" "$stage/d"; }; then
+    rm -rf -- "$stage"
+    err "快照暂存失败, 现有配置未被替换"
+    return 1
+  fi
+  # 暂存和目标处于同一文件系统, 先保留现目录, 完成恢复后才清理。
+  if [[ -e "$SSH_CONF_DIR" ]] && ! mv -T -- "$SSH_CONF_DIR" "$stage/displaced"; then
+    err "无法暂存现有目录, 保留恢复文件: $stage"
+    return 1
+  fi
+  if [[ -d "$stage/d" ]] && ! mv -T -- "$stage/d" "$SSH_CONF_DIR"; then
+    if [[ -e "$stage/displaced" ]]; then mv -T -- "$stage/displaced" "$SSH_CONF_DIR" || true; fi
+    err "目录恢复失败, 保留恢复文件: $stage"
+    return 1
+  fi
+  if ! mv -Tf -- "$stage/main" "$MAIN_CONF"; then
+    if [[ -e "$SSH_CONF_DIR" ]]; then mv -T -- "$SSH_CONF_DIR" "$stage/restored" || return 1; fi
+    if [[ -e "$stage/displaced" ]]; then mv -T -- "$stage/displaced" "$SSH_CONF_DIR" || true; fi
+    err "主配置恢复失败, 保留恢复文件: $stage"
+    return 1
+  fi
+  rm -rf -- "$stage" || warn "恢复成功, 暂存目录清理失败: $stage"
+  return 0
 }
-sshd_validate_or_rollback() {
-  mkdir -p "$SSHD_RUN_DIR" || return 1
-  if sshd -t; then return 0; fi
-  err "sshd 配置校验失败, 回滚"
-  if sshd_restore; then sshd_discard_snapshot
+sshd_abort_change() {
+  if sshd_restore; then sshd_discard_snapshot || warn "快照清理失败: $SNAP"
   else err "恢复失败, 请保留当前连接并检查快照: $SNAP"; fi
   return 1
 }
+sshd_begin_change() {
+  sshd_snapshot || return 1
+  ensure_include || { err "准备 SSH 配置失败"; sshd_abort_change; return 1; }
+}
+sshd_validate_or_rollback() {
+  if mkdir -p "$SSHD_RUN_DIR" && sshd -t; then return 0; fi
+  err "sshd 配置校验失败, 回滚"
+  sshd_abort_change
+}
 sshd_wait_ready() { # sshd_wait_ready service "port ..."
-  local svc="$1" ports="$2" attempt p ready
+  local svc="$1" ports="$2" _attempt p ready
   [[ -n "$ports" ]] || return 1
-  for attempt in 1 2 3 4 5; do
+  for _attempt in 1 2 3 4 5; do
     ready=yes
     systemctl is-active --quiet "$svc" || ready=no
     for p in $ports; do ss -ltnH "( sport = :$p )" | grep -q . || ready=no; done
@@ -166,9 +214,9 @@ sshd_expect_settings() { # sshd_expect_settings dump Key value ...
 sshd_verify_policy() { # sshd_verify_policy Key value ...
   [[ $# -gt 0 ]] || return 0
   sshd_policy_layout_supported || return 1
-  local dump u client_ip client_port server_ip server_port
+  local dump u client_ip _client_port server_ip server_port
   dump=$(sshd -T) && sshd_expect_settings "$dump" "$@" || return 1
-  read -r client_ip client_port server_ip server_port <<<"${SSH_CONNECTION:-127.0.0.1 0 127.0.0.1 22}"
+  read -r client_ip _client_port server_ip server_port <<<"${SSH_CONNECTION:-127.0.0.1 0 127.0.0.1 22}"
   for u in root $(login_users_with_keys); do
     dump=$(sshd -T -C "user=$u,addr=$client_ip,host=$client_ip,laddr=$server_ip,lport=$server_port") \
       && sshd_expect_settings "$dump" "$@" || return 1
@@ -180,20 +228,20 @@ sshd_apply() { # sshd_apply restart|reload [Key value ...]
   sshd_validate_or_rollback || return 1
   if ! sshd_verify_policy "$@"; then
     err "安全策略未生效, 恢复原配置且不重载 SSH"
-    if sshd_restore; then sshd_discard_snapshot; fi
+    sshd_abort_change
     return 1
   fi
   svc=$(ssh_svc)
-  ports=$(ssh_ports) && [[ -n "$ports" ]] || { err "无法读取预期 SSH 端口"; sshd_restore; return 1; }
+  ports=$(ssh_ports) && [[ -n "$ports" ]] || { err "无法读取预期 SSH 端口"; sshd_abort_change; return 1; }
   if [[ "$action" == restart ]]; then sshd_restart && activated=yes
   else systemctl reload "$svc" && activated=yes; fi
   if [[ "$activated" == yes ]] && sshd_wait_ready "$svc" "$ports"; then
-    sshd_discard_snapshot
+    sshd_discard_snapshot || warn "配置已生效, 快照清理失败: $SNAP"
     return 0
   fi
   err "SSH $action 或监听检查失败, 恢复原配置"
   if sshd_restore && sshd_socket_restore "$svc" && systemctl restart "$svc" && sshd_wait_ready "$svc" "$(ssh_ports)"; then
-    sshd_discard_snapshot
+    sshd_discard_snapshot || warn "快照清理失败: $SNAP"
     warn "已恢复原 SSH 配置, 未关闭旧防火墙入口"
   else
     err "自动恢复未完成, 请保留当前连接并检查快照: $SNAP"
@@ -201,12 +249,12 @@ sshd_apply() { # sshd_apply restart|reload [Key value ...]
   return 1
 }
 qs_set() { # qs_set Key "value"   (在 00-quicksetup.conf 里设置单值项)
-  sed -i "/^[[:space:]]*$1[[:space:]]/Id" "$QS_CONF"
+  sed -i "/^[[:space:]]*$1[[:space:]]/Id" "$QS_CONF" || return 1
   echo "$1 $2" >>"$QS_CONF"
 }
 sshd_socket_snapshot() {
-  local svc="$1"
-  [[ -n "$SNAP" && -d "$SNAP" ]] || { err "切换 ssh.socket 前必须有 SSH 快照"; return 1; }
+  local svc="$1" socket_enabled service_enabled active=no
+  [[ -n "$SNAP" && -f "$SNAP/complete" ]] || { err "切换 ssh.socket 前必须有完整 SSH 快照"; return 1; }
   [[ -f "$SNAP/socket.saved" ]] && return 0
   if [[ -e "$SSH_SERVICE_DROPIN" ]]; then
     cp -a "$SSH_SERVICE_DROPIN" "$SNAP/service-dropin" && backup_file "$SSH_SERVICE_DROPIN" || return 1
@@ -214,11 +262,13 @@ sshd_socket_snapshot() {
   if [[ -e "$SSH_SOCKET_DROPIN" ]]; then
     cp -a "$SSH_SOCKET_DROPIN" "$SNAP/socket-dropin" && backup_file "$SSH_SOCKET_DROPIN" || return 1
   fi
-  systemctl is-enabled ssh.socket >"$SNAP/socket.enabled" 2>/dev/null || true
-  systemctl is-enabled "$svc" >"$SNAP/service.enabled" 2>/dev/null || true
-  if systemctl is-active --quiet ssh.socket; then echo yes >"$SNAP/socket.active"
-  else echo no >"$SNAP/socket.active"; fi
-  touch "$SNAP/socket.saved"
+  socket_enabled=$(systemctl is-enabled ssh.socket 2>/dev/null) || true
+  service_enabled=$(systemctl is-enabled "$svc" 2>/dev/null) || true
+  [[ -n "$socket_enabled" && -n "$service_enabled" ]] || { err "无法备份 systemd 启用状态"; return 1; }
+  systemctl is-active --quiet ssh.socket && active=yes
+  printf '%s\n' "$socket_enabled" >"$SNAP/socket.enabled" \
+    && printf '%s\n' "$service_enabled" >"$SNAP/service.enabled" \
+    && printf '%s\n' "$active" >"$SNAP/socket.active" && touch "$SNAP/socket.saved"
 }
 restore_unit_enablement() {
   case "$2" in
@@ -231,7 +281,7 @@ restore_unit_enablement() {
 sshd_socket_restore() {
   local svc="$1" src dst
   [[ -f "$SNAP/socket.changed" ]] || return 0
-  [[ -f "$SNAP/socket.saved" ]] || return 1
+  [[ -f "$SNAP/socket.saved" && -s "$SNAP/socket.enabled" && -s "$SNAP/service.enabled" && -s "$SNAP/socket.active" ]] || return 1
   for src in service-dropin socket-dropin; do
     if [[ "$src" == service-dropin ]]; then dst="$SSH_SERVICE_DROPIN"; else dst="$SSH_SOCKET_DROPIN"; fi
     if [[ -e "$SNAP/$src" ]]; then
@@ -360,9 +410,12 @@ SELECTED_SSH_PORT=""
 remove_old_ports() { # remove_old_ports "p1 p2" keep
   local olds="$1" keep="$2" p
   [[ -z "$olds" ]] && return 0
-  [[ -n "$keep" && " $olds " != *" $keep "* ]] || { err "保留端口不能为空或同时属于旧端口"; return 1; }
-  sshd_snapshot; ensure_include
-  sed -i '/^[[:space:]]*Port[[:space:]]/Id' "$QS_CONF"; echo "Port $keep" >>"$QS_CONF"
+  [[ "$keep" =~ ^[1-9][0-9]{0,4}$ && "$keep" -le 65535 && " $olds " != *" $keep "* ]] \
+    || { err "保留端口无效或同时属于旧端口"; return 1; }
+  sshd_begin_change || return 1
+  if ! { sed -i '/^[[:space:]]*Port[[:space:]]/Id' "$QS_CONF" && echo "Port $keep" >>"$QS_CONF"; }; then
+    sshd_abort_change; return 1
+  fi
   sshd_apply restart || return 1
   if command -v ufw >/dev/null && LC_ALL=C ufw status | grep -q "Status: active"; then
     for p in $olds; do ufw delete allow "$p/tcp" >/dev/null 2>&1; ufw delete allow "$p" >/dev/null 2>&1; done
@@ -378,7 +431,7 @@ step_port() { # step_port [defer]
   cur=$(ssh_ports | tr '\n' ' '); cur="${cur% }"
   info "当前 SSH 端口: $cur"
   ask "新的 SSH 端口" "$DEFAULT_PORT"; new="$REPLY"
-  [[ "$new" =~ ^[0-9]+$ && "$new" -ge 1 && "$new" -le 65535 ]] || { err "端口不合法"; return 1; }
+  [[ "$new" =~ ^[1-9][0-9]{0,4}$ && "$new" -le 65535 ]] || { err "端口不合法, 请输入 1-65535 且不要加前导零"; return 1; }
   for p in $cur; do [[ "$p" != "$new" ]] && olds="$olds $p"; done; olds="${olds# }"
   if [[ "$cur" == "$new" ]]; then SELECTED_SSH_PORT="$new"; skip "SSH 已经只监听 $new"; return 0; fi
   if ss -ltnH "( sport = :$new )" 2>/dev/null | grep -q . && [[ " $cur " != *" $new "* ]]; then err "端口 $new 已被其他程序占用"; return 1; fi
@@ -387,15 +440,19 @@ step_port() { # step_port [defer]
     status=$(LC_ALL=C ufw status) || { err "无法读取 UFW 状态, 停止修改 SSH 端口"; return 1; }
     if [[ "$status" == *"Status: active"* ]]; then ufw_allow_ssh "$new" || return 1; fi
   fi
-  sshd_snapshot; ensure_include
+  sshd_begin_change || return 1
   # 注释掉其他位置的 Port, 统一由 00-quicksetup.conf 管理
   local f
   for f in "$MAIN_CONF" "$SSH_CONF_DIR"/*.conf; do
     [[ -f "$f" && "$f" != "$QS_CONF" ]] || continue
-    grep -Eq '^[[:space:]]*Port[[:space:]]' "$f" && sed -i -E 's/^([[:space:]]*Port[[:space:]])/#\1/I' "$f"
+    if grep -Eiq '^[[:space:]]*Port[[:space:]]' "$f"; then
+      sed -i -E 's/^([[:space:]]*Port[[:space:]])/#\1/I' "$f" || { sshd_abort_change; return 1; }
+    else
+      [[ $? -eq 1 ]] || { sshd_abort_change; return 1; }
+    fi
   done
-  sed -i '/^[[:space:]]*Port[[:space:]]/Id' "$QS_CONF"
-  for p in $olds $new; do echo "Port $p" >>"$QS_CONF"; done
+  sed -i '/^[[:space:]]*Port[[:space:]]/Id' "$QS_CONF" || { sshd_abort_change; return 1; }
+  for p in $olds $new; do echo "Port $p" >>"$QS_CONF" || { sshd_abort_change; return 1; }; done
   sshd_apply restart || return 1
   ok "sshd 已在 $new 监听 (过渡期同时保留: ${olds:-无})"
   SELECTED_SSH_PORT="$new"
@@ -481,10 +538,10 @@ step_nopass() {
   [[ -z "$users" ]] && { err "没有任何用户配置了有效公钥, 拒绝禁用密码登录 (先用菜单 2)"; return 1; }
   info "已配置公钥的用户: $users"
   confirm "你确认已经用密钥成功登录过吗?" n || { warn "已取消"; return 1; }
-  sshd_snapshot; ensure_include
-  qs_set PubkeyAuthentication yes
-  qs_set PasswordAuthentication no
-  qs_set KbdInteractiveAuthentication no
+  sshd_begin_change || return 1
+  if ! { qs_set PubkeyAuthentication yes && qs_set PasswordAuthentication no && qs_set KbdInteractiveAuthentication no; }; then
+    sshd_abort_change; return 1
+  fi
   sshd_apply reload PubkeyAuthentication yes PasswordAuthentication no KbdInteractiveAuthentication no || return 1
   ok "已禁用密码登录 (仅允许密钥)"
 }
@@ -503,9 +560,8 @@ step_noroot() {
   [[ " $cands " == *" $u "* ]] || { err "$u 不是带公钥的 sudo 用户"; return 1; }
   warn "请另开窗口测试:  ssh -p $(ssh_ports | head -1) $u@<服务器IP>  然后执行 sudo -i"
   confirm "$u 密钥登录并 sudo 成功了吗?" n || { warn "已取消"; return 1; }
-  sshd_snapshot; ensure_include
-  qs_set PermitRootLogin no
-  qs_set AllowUsers "$u"
+  sshd_begin_change || return 1
+  if ! { qs_set PermitRootLogin no && qs_set AllowUsers "$u"; }; then sshd_abort_change; return 1; fi
   sshd_apply reload PermitRootLogin no AllowUsers "$u" || return 1
   ok "已禁用 root 登录, 只允许 $u"
   if passwd -S root 2>/dev/null | awk '{exit !($2=="L")}'; then skip "root 密码已锁定"

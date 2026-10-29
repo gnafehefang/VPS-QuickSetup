@@ -4,6 +4,7 @@ set -o pipefail
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd) || exit 1
 source "$ROOT/setup.sh"
 TEST_TMP=$(mktemp -d) || exit 1
+export TMPDIR="$TEST_TMP"
 trap 'command rm -rf -- "$TEST_TMP"' EXIT
 
 info() { :; }
@@ -31,7 +32,7 @@ test_all_keeps_selected_lower_port() (
   step_update() { :; }
   step_tz() { :; }
   step_pubkey() { :; }
-  step_admin() { ADMIN_USER=admin; }
+  step_admin() { ADMIN_USER='admin'; }
   step_port() { PENDING_OLD_PORTS=22222; SELECTED_SSH_PORT=6090; }
   step_ufw() { :; }
   step_fail2ban() { :; }
@@ -292,6 +293,138 @@ test_additional_allowusers_is_rejected() (
 
 test_duplicate_allowusers_does_not_cause_false_conflict() (
   sshd_expect_settings $'permitrootlogin no\nallowusers admin\nallowusers admin' PermitRootLogin no AllowUsers admin
+)
+
+test_failed_snapshot_copy_blocks_port_changes() (
+  make_ssh_fixture || return 1
+  local original
+  original=$(<"$MAIN_CONF")
+  ssh_ports() { printf '22\n'; }
+  ask() { REPLY=6090; }
+  ss() { return 0; }
+  cp() { [[ "$2" == "$SSH_CONF_DIR" ]] && return 1; command cp "$@"; }
+  if step_port; then return 1; fi
+  [[ -z "$SNAP" && "$(<"$MAIN_CONF")" == "$original" ]] && grep -qx 'Port 22' "$QS_CONF"
+)
+
+test_failed_mktemp_blocks_snapshot() (
+  make_ssh_fixture || return 1
+  mktemp() { return 1; }
+  if sshd_snapshot; then return 1; fi
+  [[ -z "$SNAP" ]] && grep -qx 'Port 22' "$QS_CONF"
+)
+
+test_persistent_backup_failure_blocks_snapshot() (
+  make_ssh_fixture || return 1
+  printf 'blocker\n' >"$BACKUP_DIR"
+  if sshd_snapshot; then return 1; fi
+  [[ -z "$SNAP" ]] && grep -qx 'Port 22' "$QS_CONF"
+)
+
+test_incomplete_snapshot_does_not_replace_config() (
+  make_ssh_fixture || return 1
+  SNAP=$(mktemp -d)
+  printf 'Port 22\n' >"$SNAP/main"
+  if sshd_restore; then return 1; fi
+  grep -qx 'Port 22' "$QS_CONF"
+)
+
+test_failed_restore_staging_preserves_current_directory() (
+  make_ssh_fixture || return 1
+  sshd_snapshot || return 1
+  printf 'current contents\n' >"$QS_CONF"
+  cp() { [[ "$2" == "$SNAP/d" ]] && return 1; command cp "$@"; }
+  if sshd_restore; then return 1; fi
+  [[ -f "$SNAP/complete" ]] && grep -qx 'current contents' "$QS_CONF"
+)
+
+test_absent_config_directory_is_restored_as_absent() (
+  make_ssh_fixture || return 1
+  rm -f -- "$QS_CONF" && rmdir -- "$SSH_CONF_DIR" || return 1
+  sshd_snapshot || return 1
+  ensure_include || return 1
+  sshd_restore || return 1
+  [[ ! -e "$SSH_CONF_DIR" ]] && grep -qx 'Port 22' "$MAIN_CONF"
+)
+
+test_existing_recovery_snapshot_is_not_overwritten() (
+  make_ssh_fixture || return 1
+  sshd_snapshot || return 1
+  local saved="$SNAP"
+  if sshd_snapshot; then return 1; fi
+  [[ "$SNAP" == "$saved" && -f "$saved/complete" ]]
+)
+
+test_failed_config_write_rolls_back_before_reload() (
+  make_ssh_fixture || return 1
+  sshd_val() { printf 'yes\n'; }
+  login_users_with_keys() { printf 'admin\n'; }
+  confirm() { return 0; }
+  sed() { return 1; }
+  systemctl() { printf 'unexpected service operation\n' >&2; exit 99; }
+  if step_nopass; then return 1; fi
+  [[ -z "$SNAP" ]] && grep -qx 'Port 22' "$QS_CONF"
+)
+
+test_first_persistent_backup_is_preserved() (
+  make_ssh_fixture || return 1
+  backup_file "$MAIN_CONF" || return 1
+  printf 'Port 6090\n' >"$MAIN_CONF"
+  backup_file "$MAIN_CONF" || return 1
+  grep -qx 'Port 22' "$BACKUP_DIR/${MAIN_CONF//\//_}"
+)
+
+test_failed_restore_directory_rename_preserves_current_config() (
+  make_ssh_fixture || return 1
+  sshd_snapshot || return 1
+  printf 'current contents\n' >"$QS_CONF"
+  mv() { [[ "$3" == */d && "$4" == "$SSH_CONF_DIR" ]] && return 1; command mv "$@"; }
+  if sshd_restore; then return 1; fi
+  [[ -f "$SNAP/complete" ]] && grep -qx 'current contents' "$QS_CONF"
+)
+
+test_failed_restore_main_rename_restores_displaced_directory() (
+  make_ssh_fixture || return 1
+  sshd_snapshot || return 1
+  printf 'current contents\n' >"$QS_CONF"
+  mv() { [[ "$3" == */main && "$4" == "$MAIN_CONF" ]] && return 1; command mv "$@"; }
+  if sshd_restore; then return 1; fi
+  [[ -f "$SNAP/complete" ]] && grep -qx 'current contents' "$QS_CONF"
+)
+
+test_failed_include_preparation_rolls_back() (
+  make_ssh_fixture || return 1
+  cp() {
+    [[ "$2" == "$MAIN_CONF" && "$3" == "$MAIN_CONF".quicksetup.* ]] && return 1
+    command cp "$@"
+  }
+  if sshd_begin_change; then return 1; fi
+  [[ -z "$SNAP" ]] && grep -qx 'Port 22' "$MAIN_CONF" && grep -qx 'Port 22' "$QS_CONF"
+)
+
+test_failed_recovery_retains_complete_snapshot() (
+  make_ssh_fixture || return 1
+  sshd() { return 0; }
+  ssh_svc() { printf 'ssh\n'; }
+  ssh_ports() { printf '22\n'; }
+  sshd_restart() { return 1; }
+  systemctl() { return 1; }
+  sshd_snapshot || return 1
+  printf 'Port 6090\n' >"$QS_CONF"
+  if sshd_apply restart; then return 1; fi
+  [[ -f "$SNAP/complete" ]] && grep -qx 'Port 22' "$QS_CONF"
+)
+
+test_noncanonical_port_cannot_bypass_old_port_guard() (
+  sshd_snapshot() { printf 'unexpected snapshot\n' >&2; exit 99; }
+  ! remove_old_ports 22 00022
+)
+
+test_port_with_leading_zero_is_rejected_before_changes() (
+  ssh_ports() { printf '22\n'; }
+  ask() { REPLY=00022; }
+  if step_port; then return 1; fi
+  [[ -z "$SELECTED_SSH_PORT" ]]
 )
 
 passed=0
