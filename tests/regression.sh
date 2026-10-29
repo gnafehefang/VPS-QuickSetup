@@ -1072,6 +1072,12 @@ test_summary_ssh_explanation_starts_after_blank_line() (
     && grep -qF '       启用密钥认证不代表已验证登录。' "$SUMMARY_TEST_OUTPUT"
 )
 
+test_summary_listener_explanation_starts_after_blank_line() (
+  make_summary_fixture || return 1
+  summary >"$SUMMARY_TEST_OUTPUT" || return 1
+  summary_note_after_blank '以上包含回环和系统服务监听'
+)
+
 test_summary_sections_have_colored_headers_and_blank_lines() (
   make_summary_fixture || return 1
   summary >"$SUMMARY_TEST_OUTPUT" || return 1

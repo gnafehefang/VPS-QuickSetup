@@ -995,7 +995,7 @@ summary() {
   summary_section "TCP / UDP 监听"
   if command -v ss >/dev/null; then ss -lntup || warn "读取监听端口失败"
   else warn "ss 未安装, 无法显示实际监听"; fi
-  echo "以上包含回环和系统服务监听, 不是公网可达性测试。"
+  summary_note "以上包含回环和系统服务监听, 不是公网可达性测试。"
   summary_section "UFW 防火墙"
   if command -v ufw >/dev/null; then
     if ufw_dump=$(LC_ALL=C ufw status numbered); then
