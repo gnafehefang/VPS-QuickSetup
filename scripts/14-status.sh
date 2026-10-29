@@ -121,6 +121,8 @@ summary() {
   {
     echo "主机名         : $(hostname)"
     echo "时区           : $(timedatectl show -p Timezone --value 2>/dev/null)"
+    summary_status "自动校时已启用 " "$(ntp_value NTP)" yes
+    summary_status "系统时钟已同步 " "$(ntp_value NTPSynchronized)" yes
     echo "swap           : $(swapon --show=NAME,SIZE --noheadings 2>/dev/null | paste -sd' ' -)"
     echo "拥塞控制       : $(sysctl -n net.ipv4.tcp_congestion_control) / $(sysctl -n net.core.default_qdisc)"
   } 2>&1 | summary_indent

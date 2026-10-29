@@ -760,10 +760,21 @@ make_summary_fixture() {
   SSHD_RUN_DIR="$dir/run"
   BACKUP_DIR="$dir/absent-backup"
   SUMMARY_TEST_OUTPUT="$dir/output"
+  SUMMARY_TEST_NTP=yes
+  SUMMARY_TEST_SYNC=yes
+  SUMMARY_TEST_NTP_FAIL=no
+  SUMMARY_TEST_SYNC_FAIL=no
   sshd() { printf '%s\n' "$SUMMARY_TEST_DUMP"; [[ "$SUMMARY_TEST_SSHD_FAIL" == no ]]; }
   hostname() { printf 'Host20261029\n'; }
   public_ip() { printf '192.0.2.1\n'; }
-  timedatectl() { printf 'Asia/Singapore\n'; }
+  timedatectl() {
+    case "$*" in
+      'show -p Timezone --value') printf 'Asia/Singapore\n' ;;
+      'show -p NTP --value') printf '%s\n' "$SUMMARY_TEST_NTP"; [[ "$SUMMARY_TEST_NTP_FAIL" == no ]] ;;
+      'show -p NTPSynchronized --value') printf '%s\n' "$SUMMARY_TEST_SYNC"; [[ "$SUMMARY_TEST_SYNC_FAIL" == no ]] ;;
+      *) return 99 ;;
+    esac
+  }
   swapon() { :; }
   sysctl() { printf 'test\n'; }
   ufw() { printf 'Status: active\n'; }
@@ -993,6 +1004,8 @@ test_summary_security_targets_are_green() (
   SUMMARY_TEST_DUMP+=$'\nallowusers admin'
   summary >"$SUMMARY_TEST_OUTPUT" || return 1
   grep -qF "root 登录      : ${c_grn}no${c_off}" "$SUMMARY_TEST_OUTPUT" \
+    && grep -qF "自动校时已启用 : ${c_grn}yes${c_off}" "$SUMMARY_TEST_OUTPUT" \
+    && grep -qF "系统时钟已同步 : ${c_grn}yes${c_off}" "$SUMMARY_TEST_OUTPUT" \
     && grep -qF "密码登录       : ${c_grn}no${c_off}" "$SUMMARY_TEST_OUTPUT" \
     && grep -qF "密钥登录       : ${c_grn}yes${c_off}" "$SUMMARY_TEST_OUTPUT" \
     && grep -qF "键盘交互认证   : ${c_grn}no${c_off}" "$SUMMARY_TEST_OUTPUT" \
@@ -1036,14 +1049,78 @@ test_summary_unsafe_security_values_are_red() (
 test_summary_failed_queries_are_red_unknown_not_green() (
   make_summary_fixture || return 1
   SUMMARY_TEST_SSHD_FAIL=yes
+  SUMMARY_TEST_NTP_FAIL=yes
+  SUMMARY_TEST_SYNC_FAIL=yes
   ufw() { printf 'Status: active\n'; return 1; }
   fail2ban-client() { printf 'Status for the jail: sshd\n'; return 1; }
   summary >"$SUMMARY_TEST_OUTPUT" || return 1
   local label
-  for label in 'root 登录      ' '密码登录       ' '密钥登录       ' '键盘交互认证   ' 'UFW 已启用     ' 'sshd jail 就绪 '; do
+  for label in '自动校时已启用 ' '系统时钟已同步 ' 'root 登录      ' '密码登录       ' '密钥登录       ' '键盘交互认证   ' 'UFW 已启用     ' 'sshd jail 就绪 '; do
     grep -qF "$label: ${c_red}未知 (读取失败)${c_off}" "$SUMMARY_TEST_OUTPUT" || return 1
   done
   ! grep -qF "$c_grn" "$SUMMARY_TEST_OUTPUT"
+)
+
+test_summary_ntp_enabled_and_synchronized_are_independent() (
+  local states ntp sync ntp_color sync_color
+  for states in 'yes no' 'no yes' 'no no' 'yes yes'; do
+    make_summary_fixture || return 1
+    read -r ntp sync <<<"$states"
+    SUMMARY_TEST_NTP="$ntp"
+    SUMMARY_TEST_SYNC="$sync"
+    ntp_color="$c_red"; sync_color="$c_red"
+    [[ "$ntp" != yes ]] || ntp_color="$c_grn"
+    [[ "$sync" != yes ]] || sync_color="$c_grn"
+    summary >"$SUMMARY_TEST_OUTPUT" || return 1
+    grep -qxF "    自动校时已启用 : $ntp_color$ntp$c_off" "$SUMMARY_TEST_OUTPUT" \
+      && grep -qxF "    系统时钟已同步 : $sync_color$sync$c_off" "$SUMMARY_TEST_OUTPUT" || return 1
+  done
+)
+
+test_summary_ntp_bad_or_failed_property_is_unknown_without_hiding_other_state() (
+  local property state ntp_expected sync_expected
+  for property in NTP SYNC; do
+    for state in invalid empty failed; do
+      make_summary_fixture || return 1
+      ntp_expected="${c_grn}yes${c_off}"
+      sync_expected="${c_grn}yes${c_off}"
+      if [[ "$property" == NTP ]]; then
+        ntp_expected="${c_red}未知 (读取失败)${c_off}"
+        case "$state" in
+          invalid) SUMMARY_TEST_NTP=active ;;
+          empty) SUMMARY_TEST_NTP='' ;;
+          failed) SUMMARY_TEST_NTP_FAIL=yes ;;
+        esac
+      else
+        sync_expected="${c_red}未知 (读取失败)${c_off}"
+        case "$state" in
+          invalid) SUMMARY_TEST_SYNC=true ;;
+          empty) SUMMARY_TEST_SYNC='' ;;
+          failed) SUMMARY_TEST_SYNC_FAIL=yes ;;
+        esac
+      fi
+      summary >"$SUMMARY_TEST_OUTPUT" || return 1
+      grep -qxF "    自动校时已启用 : $ntp_expected" "$SUMMARY_TEST_OUTPUT" \
+        && grep -qxF "    系统时钟已同步 : $sync_expected" "$SUMMARY_TEST_OUTPUT" || return 1
+    done
+  done
+)
+
+test_summary_ntp_queries_are_read_only() (
+  make_summary_fixture || return 1
+  local log="$SUMMARY_TEST_OUTPUT.calls"
+  timedatectl() {
+    printf '%s\n' "$*" >>"$log"
+    case "$*" in
+      'show -p Timezone --value') printf 'Asia/Singapore\n' ;;
+      'show -p NTP --value'|'show -p NTPSynchronized --value') printf 'yes\n' ;;
+      *) return 99 ;;
+    esac
+  }
+  summary >"$SUMMARY_TEST_OUTPUT" || return 1
+  [[ "$(wc -l <"$log")" == 3 \
+    && "$(grep -cxF 'show -p NTP --value' "$log")" == 1 \
+    && "$(grep -cxF 'show -p NTPSynchronized --value' "$log")" == 1 ]]
 )
 
 test_summary_main_banner_is_bold_bright_and_separated() (
@@ -1170,7 +1247,7 @@ test_summary_command_errors_are_indented_in_their_sections() (
 
 test_timezone_default_and_menu_match() (
   [[ "$DEFAULT_TZ" == Asia/Singapore ]] \
-    && menu | grep -qF '设置时区 (默认 Asia/Singapore)'
+    && menu | grep -qF '设置时区 + 自动校时 (默认 Asia/Singapore)'
 )
 
 test_timezone_enter_uses_default() (
@@ -1186,6 +1263,221 @@ test_timezone_step_uses_configured_default() (
   ask() { [[ "$1" == 时区 && "$2" == "$DEFAULT_TZ" ]]; exit "$?"; }
   step_tz
   return 1
+)
+
+make_timezone_fixture() {
+  local dir
+  dir=$(mktemp -d "$TEST_TMP/timezone.XXXXXX") || return 1
+  ZONEINFO_DIR="$dir/zoneinfo"
+  LOCALTIME_FILE="$dir/localtime"
+  TIMEZONE_FILE="$dir/timezone"
+  TIME_TEST_CALLS="$dir/calls"
+  TIME_TEST_OUTPUT="$dir/output"
+  DEFAULT_TZ=Asia/Singapore
+  TIME_TEST_INPUT=Asia/Singapore
+  TIME_TEST_ZONE=Asia/Singapore
+  TIME_TEST_NTP=no
+  TIME_TEST_SUPPORTED=yes
+  TIME_TEST_SYNC=yes
+  TIME_TEST_FAIL_PROPERTY=''
+  TIME_TEST_ZONE_SET_FAIL=no
+  TIME_TEST_NTP_SET_FAIL=no
+  TIME_TEST_AFTER_ENABLE=yes
+  TIME_TEST_AFTER_ENABLE_READ_FAIL=no
+  mkdir -p "$ZONEINFO_DIR/Asia" || return 1
+  printf 'fixture Singapore\n' >"$ZONEINFO_DIR/Asia/Singapore"
+  printf 'fixture UTC\n' >"$ZONEINFO_DIR/UTC"
+  printf '%s\n' "$TIME_TEST_ZONE" >"$TIMEZONE_FILE"
+  ask() { REPLY="$TIME_TEST_INPUT"; }
+  ok() { printf 'OK %s\n' "$*"; }
+  skip() { printf 'SKIP %s\n' "$*"; }
+  warn() { printf 'WARN %s\n' "$*"; }
+  timedatectl() {
+    printf '%s\n' "$*" >>"$TIME_TEST_CALLS"
+    local value
+    case "$1" in
+      show)
+        [[ "$2" == -p && "$4" == --value ]] || return 99
+        case "$3" in
+          Timezone) value="$TIME_TEST_ZONE" ;;
+          NTP) value="$TIME_TEST_NTP" ;;
+          CanNTP) value="$TIME_TEST_SUPPORTED" ;;
+          NTPSynchronized) value="$TIME_TEST_SYNC" ;;
+          *) return 99 ;;
+        esac
+        printf '%s\n' "$value"
+        [[ "$TIME_TEST_FAIL_PROPERTY" != "$3" ]] ;;
+      set-timezone)
+        [[ "$TIME_TEST_ZONE_SET_FAIL" == no ]] || return 1
+        TIME_TEST_ZONE="$2" ;;
+      set-ntp)
+        [[ "$*" == 'set-ntp true' && "$TIME_TEST_NTP_SET_FAIL" == no ]] || return 1
+        TIME_TEST_NTP="$TIME_TEST_AFTER_ENABLE"
+        if [[ "$TIME_TEST_AFTER_ENABLE_READ_FAIL" == yes ]]; then TIME_TEST_FAIL_PROPERTY=NTP
+        elif [[ "$TIME_TEST_FAIL_PROPERTY" == NTP ]]; then TIME_TEST_FAIL_PROPERTY=''; fi ;;
+      *) return 99 ;;
+    esac
+  }
+}
+
+test_timezone_unchanged_still_enables_ntp_and_checks_sync() (
+  make_timezone_fixture || return 1
+  step_tz >"$TIME_TEST_OUTPUT" 2>&1 || return 1
+  [[ "$(grep -cxF 'set-ntp true' "$TIME_TEST_CALLS")" == 1 ]] \
+    && ! grep -q '^set-timezone ' "$TIME_TEST_CALLS" \
+    && grep -qxF 'show -p NTPSynchronized --value' "$TIME_TEST_CALLS" \
+    && grep -qxF 'SKIP 时区已是 Asia/Singapore' "$TIME_TEST_OUTPUT" \
+    && grep -qxF 'OK 自动校时已启用' "$TIME_TEST_OUTPUT" \
+    && grep -qxF 'OK 系统时钟已同步' "$TIME_TEST_OUTPUT"
+)
+
+test_timezone_existing_ntp_keeps_service_and_still_checks_sync() (
+  make_timezone_fixture || return 1
+  TIME_TEST_NTP=yes
+  step_tz >"$TIME_TEST_OUTPUT" 2>&1 || return 1
+  ! grep -qE '^set-|CanNTP' "$TIME_TEST_CALLS" \
+    && grep -qxF 'SKIP 自动校时已启用' "$TIME_TEST_OUTPUT" \
+    && grep -qxF 'OK 系统时钟已同步' "$TIME_TEST_OUTPUT"
+)
+
+test_timezone_change_also_enables_ntp() (
+  make_timezone_fixture || return 1
+  TIME_TEST_ZONE=UTC
+  step_tz >"$TIME_TEST_OUTPUT" 2>&1 || return 1
+  [[ "$TIME_TEST_ZONE" == Asia/Singapore ]] \
+    && grep -qxF 'set-timezone Asia/Singapore' "$TIME_TEST_CALLS" \
+    && grep -qxF 'set-ntp true' "$TIME_TEST_CALLS" \
+    && grep -qxF 'OK 系统时钟已同步' "$TIME_TEST_OUTPUT"
+)
+
+test_timezone_ntp_enabled_is_not_treated_as_synchronized() (
+  make_timezone_fixture || return 1
+  TIME_TEST_SYNC=no
+  step_tz >"$TIME_TEST_OUTPUT" 2>&1 || return 1
+  grep -qxF 'OK 自动校时已启用' "$TIME_TEST_OUTPUT" \
+    && grep -qF 'WARN 自动校时已启用, 但系统时钟尚未同步' "$TIME_TEST_OUTPUT" \
+    && ! grep -qF 'OK 系统时钟已同步' "$TIME_TEST_OUTPUT"
+)
+
+test_timezone_failed_sync_query_is_not_reported_as_synchronized() (
+  make_timezone_fixture || return 1
+  TIME_TEST_FAIL_PROPERTY=NTPSynchronized
+  step_tz >"$TIME_TEST_OUTPUT" 2>&1 || return 1
+  grep -qF 'WARN 自动校时已启用, 但无法读取时钟同步状态' "$TIME_TEST_OUTPUT" \
+    && ! grep -qF 'OK 系统时钟已同步' "$TIME_TEST_OUTPUT"
+)
+
+test_timezone_invalid_sync_value_is_not_reported_as_synchronized() (
+  make_timezone_fixture || return 1
+  TIME_TEST_NTP=yes
+  TIME_TEST_SYNC=unknown
+  step_tz >"$TIME_TEST_OUTPUT" 2>&1 || return 1
+  grep -qF '无法读取时钟同步状态' "$TIME_TEST_OUTPUT" \
+    && ! grep -qF 'OK 系统时钟已同步' "$TIME_TEST_OUTPUT"
+)
+
+test_timezone_no_ntp_service_is_failure_without_install_or_switch() (
+  make_timezone_fixture || return 1
+  TIME_TEST_SUPPORTED=no
+  apt_install() { printf 'unexpected install\n' >&2; exit 99; }
+  if step_tz >"$TIME_TEST_OUTPUT" 2>&1; then return 1; fi
+  grep -qF '未发现 timedatectl 可识别的校时服务' "$TIME_TEST_OUTPUT" \
+    && ! grep -qE '^set-|NTPSynchronized' "$TIME_TEST_CALLS" \
+    && ! grep -qF 'unexpected install' "$TIME_TEST_OUTPUT"
+)
+
+test_timezone_unknown_ntp_support_can_still_enable_existing_service() (
+  make_timezone_fixture || return 1
+  TIME_TEST_FAIL_PROPERTY=CanNTP
+  step_tz >"$TIME_TEST_OUTPUT" 2>&1 || return 1
+  grep -qxF 'set-ntp true' "$TIME_TEST_CALLS" \
+    && grep -qxF 'OK 自动校时已启用' "$TIME_TEST_OUTPUT"
+)
+
+test_timezone_ntp_enable_failure_is_not_success() (
+  make_timezone_fixture || return 1
+  TIME_TEST_NTP_SET_FAIL=yes
+  if step_tz >"$TIME_TEST_OUTPUT" 2>&1; then return 1; fi
+  grep -qF '启用自动校时失败' "$TIME_TEST_OUTPUT" \
+    && ! grep -qF 'OK 自动校时已启用' "$TIME_TEST_OUTPUT" \
+    && ! grep -qF 'OK 系统时钟已同步' "$TIME_TEST_OUTPUT"
+)
+
+test_timezone_ntp_enable_requires_successful_yes_readback() (
+  local state
+  for state in no invalid empty failed; do
+    (
+      make_timezone_fixture || return 1
+      case "$state" in
+        no) TIME_TEST_AFTER_ENABLE=no ;;
+        invalid) TIME_TEST_AFTER_ENABLE=active ;;
+        empty) TIME_TEST_AFTER_ENABLE='' ;;
+        failed) TIME_TEST_AFTER_ENABLE_READ_FAIL=yes ;;
+      esac
+      if step_tz >"$TIME_TEST_OUTPUT" 2>&1; then return 1; fi
+      grep -qF '未能确认 NTP=yes' "$TIME_TEST_OUTPUT" \
+        && ! grep -qF 'OK 自动校时已启用' "$TIME_TEST_OUTPUT" \
+        && ! grep -qF 'OK 系统时钟已同步' "$TIME_TEST_OUTPUT"
+    ) || return 1
+  done
+)
+
+test_timezone_failed_initial_ntp_read_can_recover_after_enable() (
+  make_timezone_fixture || return 1
+  TIME_TEST_NTP=yes
+  TIME_TEST_FAIL_PROPERTY=NTP
+  step_tz >"$TIME_TEST_OUTPUT" 2>&1 || return 1
+  grep -qxF 'set-ntp true' "$TIME_TEST_CALLS" \
+    && grep -qxF 'OK 自动校时已启用' "$TIME_TEST_OUTPUT" \
+    && ! grep -qF 'SKIP 自动校时已启用' "$TIME_TEST_OUTPUT"
+)
+
+test_timezone_invalid_zone_does_not_change_ntp() (
+  make_timezone_fixture || return 1
+  TIME_TEST_INPUT=Invalid/Zone
+  if step_tz >"$TIME_TEST_OUTPUT" 2>&1; then return 1; fi
+  grep -qF '无效时区' "$TIME_TEST_OUTPUT" \
+    && [[ "$(wc -l <"$TIME_TEST_CALLS")" == 1 ]]
+)
+
+test_timezone_fallback_failure_does_not_report_success_or_enable_ntp() (
+  make_timezone_fixture || return 1
+  TIME_TEST_INPUT=UTC
+  TIME_TEST_ZONE_SET_FAIL=yes
+  ln() { return 1; }
+  if step_tz >"$TIME_TEST_OUTPUT" 2>&1; then return 1; fi
+  grep -qF '设置时区失败' "$TIME_TEST_OUTPUT" \
+    && grep -qxF 'Asia/Singapore' "$TIMEZONE_FILE" \
+    && ! grep -qE 'NTP|set-ntp' "$TIME_TEST_CALLS" \
+    && ! grep -qF 'OK 时区已设为' "$TIME_TEST_OUTPUT"
+)
+
+test_timezone_fallback_success_still_checks_ntp() (
+  make_timezone_fixture || return 1
+  TIME_TEST_INPUT=UTC
+  TIME_TEST_ZONE_SET_FAIL=yes
+  step_tz >"$TIME_TEST_OUTPUT" 2>&1 || return 1
+  grep -qxF UTC "$TIMEZONE_FILE" \
+    && cmp -s "$ZONEINFO_DIR/UTC" "$LOCALTIME_FILE" \
+    && grep -qxF 'set-ntp true' "$TIME_TEST_CALLS" \
+    && grep -qxF 'OK 自动校时已启用' "$TIME_TEST_OUTPUT"
+)
+
+test_ntp_property_reader_rejects_unknown_and_failed_boolean_outputs() (
+  make_timezone_fixture || return 1
+  local state value
+  for state in yes no active true ''; do
+    TIME_TEST_NTP="$state"
+    if value=$(ntp_value NTP); then
+      [[ "$state" == yes || "$state" == no ]] && [[ "$value" == "$state" ]] || return 1
+    else
+      [[ "$state" != yes && "$state" != no && -z "$value" ]] || return 1
+    fi
+  done
+  TIME_TEST_NTP=yes
+  TIME_TEST_FAIL_PROPERTY=NTP
+  if value=$(ntp_value NTP); then return 1; fi
+  [[ -z "$value" ]]
 )
 
 make_hostname_fixture() {
@@ -1391,7 +1683,7 @@ test_menu_displays_safe_order() (
   actual=$(menu | sed -n 's/^ *\([0-9][0-9]*\. .*\)$/\1/p')
   expected=$(printf '%s\n' \
     '1. 系统更新 + 基础工具' \
-    "2. 设置时区 (默认 $DEFAULT_TZ)" \
+    "2. 设置时区 + 自动校时 (默认 $DEFAULT_TZ)" \
     '3. 添加公钥 (启用密钥登录)' \
     '4. 创建 admin 用户' \
     "5. 修改 SSH 端口 (默认随机 $SSH_RANDOM_PORT_MIN-$SSH_RANDOM_PORT_MAX)" \

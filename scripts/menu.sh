@@ -6,7 +6,7 @@ menu() {
 
 ${c_grn}======= VPS-QuickSetup =======${c_off}
  1. 系统更新 + 基础工具
- 2. 设置时区 (默认 $DEFAULT_TZ)
+ 2. 设置时区 + 自动校时 (默认 $DEFAULT_TZ)
  3. 添加公钥 (启用密钥登录)
  4. 创建 admin 用户
  5. 修改 SSH 端口 (默认随机 $SSH_RANDOM_PORT_MIN-$SSH_RANDOM_PORT_MAX)

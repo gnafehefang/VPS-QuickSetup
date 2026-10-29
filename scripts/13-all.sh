@@ -8,7 +8,7 @@ step_all() {
   PENDING_OLD_PORTS=""
   SELECTED_SSH_PORT=""
   run_step "1. 系统更新" step_update
-  run_step "2. 时区" step_tz
+  run_step "2. 时区 + 自动校时" step_tz
   run_step "3. 添加公钥" step_pubkey || return 1
   run_step "4. 创建管理员" step_admin || { ADMIN_USER=""; return 1; }
   admin_login_ready "$ADMIN_USER" || { ADMIN_USER=""; return 1; }
