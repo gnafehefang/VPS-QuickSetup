@@ -177,6 +177,149 @@ test_admin_rejects_root_uid_and_nonlogin_shell() (
   [[ -z "$ADMIN_USER" && "$ADMIN_TEST_USERMOD_CALLS" == 0 ]]
 )
 
+make_key_fixture() {
+  local dir
+  dir=$(mktemp -d "$TEST_TMP/keys.XXXXXX") || return 1
+  KEY_TEST_HOME="$dir/home"
+  KEY_TEST_LOG="$dir/messages"
+  mkdir -p "$KEY_TEST_HOME" || return 1
+  ssh-keygen -q -t ed25519 -N '' -f "$dir/test-key" || return 1
+  KEY_TEST_KEY=$(<"$dir/test-key.pub")
+  : >"$KEY_TEST_LOG"
+  getent() {
+    [[ "$1:$2" == passwd:admin ]] || return 2
+    printf 'admin:x:1000:1000::%s:/bin/bash\n' "$KEY_TEST_HOME"
+  }
+  id() {
+    case "$*" in
+      admin) return 0 ;;
+      '-gn admin') printf 'admin\n' ;;
+      *) return 1 ;;
+    esac
+  }
+  install() {
+    [[ "$*" == "-d -m 700 -o admin -g admin $KEY_TEST_HOME/.ssh" ]] \
+      && command mkdir -p -- "${@: -1}"
+  }
+  chmod() { [[ "$*" == "600 $KEY_TEST_HOME/.ssh/authorized_keys" ]]; }
+  chown() { return 0; }
+  ok() { printf '%s\n' "$*" >>"$KEY_TEST_LOG"; }
+}
+
+test_key_missing_user_never_touches_files() (
+  make_key_fixture || return 1
+  id() { return 1; }
+  install() { printf 'unexpected install\n' >&2; exit 99; }
+  if add_key_lines admin <<<"$KEY_TEST_KEY"; then return 1; fi
+  [[ ! -s "$KEY_TEST_LOG" && ! -e "$KEY_TEST_HOME/.ssh" ]]
+)
+
+test_key_empty_root_or_missing_home_never_touches_files() (
+  make_key_fixture || return 1
+  local bad_home
+  getent() { printf 'admin:x:1000:1000::%s:/bin/bash\n' "$bad_home"; }
+  install() { printf 'unexpected install\n' >&2; exit 99; }
+  for bad_home in '' / "$KEY_TEST_HOME/missing"; do
+    if add_key_lines admin <<<"$KEY_TEST_KEY"; then return 1; fi
+  done
+  [[ ! -s "$KEY_TEST_LOG" ]]
+)
+
+test_key_install_failure_is_not_reported_as_success() (
+  make_key_fixture || return 1
+  install() { return 1; }
+  if add_key_lines admin <<<"$KEY_TEST_KEY"; then return 1; fi
+  [[ ! -s "$KEY_TEST_LOG" && ! -e "$KEY_TEST_HOME/.ssh/authorized_keys" ]]
+)
+
+test_key_permission_failure_is_not_reported_as_success() (
+  make_key_fixture || return 1
+  chown() { return 1; }
+  if add_key_lines admin <<<"$KEY_TEST_KEY"; then return 1; fi
+  [[ ! -s "$KEY_TEST_LOG" && ! -s "$KEY_TEST_HOME/.ssh/authorized_keys" ]]
+)
+
+test_key_append_failure_is_not_reported_as_success() (
+  make_key_fixture || return 1
+  local KEY_TEST_WRITES=0
+  printf() {
+    if [[ "${2:-}" == "$KEY_TEST_KEY" ]]; then
+      ((KEY_TEST_WRITES+=1))
+      [[ "$KEY_TEST_WRITES" != 2 ]] || return 1
+    fi
+    builtin printf "$@"
+  }
+  if add_key_lines admin <<<"$KEY_TEST_KEY"; then return 1; fi
+  [[ "$KEY_TEST_WRITES" == 2 && ! -s "$KEY_TEST_LOG" && ! -s "$KEY_TEST_HOME/.ssh/authorized_keys" ]]
+)
+
+test_key_read_failure_does_not_append_or_report_success() (
+  make_key_fixture || return 1
+  grep() { return 2; }
+  if add_key_lines admin <<<"$KEY_TEST_KEY"; then return 1; fi
+  [[ ! -s "$KEY_TEST_LOG" && ! -s "$KEY_TEST_HOME/.ssh/authorized_keys" ]]
+)
+
+test_key_tempfile_failure_prevents_writes() (
+  make_key_fixture || return 1
+  mktemp() { return 1; }
+  if add_key_lines admin <<<"$KEY_TEST_KEY"; then return 1; fi
+  [[ ! -s "$KEY_TEST_LOG" && ! -e "$KEY_TEST_HOME/.ssh" ]]
+)
+
+test_key_all_invalid_input_returns_failure() (
+  make_key_fixture || return 1
+  if add_key_lines admin <<<'not-a-public-key'; then return 1; fi
+  [[ ! -s "$KEY_TEST_LOG" && ! -s "$KEY_TEST_HOME/.ssh/authorized_keys" ]]
+)
+
+test_key_valid_unterminated_input_is_written_and_deduplicated() (
+  make_key_fixture || return 1
+  local input="$KEY_TEST_HOME/input"
+  printf '%s' "$KEY_TEST_KEY" >"$input"
+  add_key_lines admin <"$input" && add_key_lines admin <"$input" || return 1
+  has_keys admin && grep -qxF "$KEY_TEST_KEY" "$KEY_TEST_HOME/.ssh/authorized_keys" \
+    && [[ "$(wc -l <"$KEY_TEST_HOME/.ssh/authorized_keys")" == 1 \
+      && "$(wc -l <"$KEY_TEST_LOG")" == 1 ]]
+)
+
+test_key_append_separates_existing_unterminated_line() (
+  make_key_fixture || return 1
+  mkdir -p "$KEY_TEST_HOME/.ssh"
+  printf '%s old-comment' "$KEY_TEST_KEY" >"$KEY_TEST_HOME/.ssh/authorized_keys"
+  add_key_lines admin <<<"$KEY_TEST_KEY" || return 1
+  [[ "$(wc -l <"$KEY_TEST_HOME/.ssh/authorized_keys")" == 2 ]] \
+    && grep -qxF "$KEY_TEST_KEY" "$KEY_TEST_HOME/.ssh/authorized_keys"
+)
+
+test_key_directory_target_is_rejected_before_writes() (
+  make_key_fixture || return 1
+  mkdir -p "$KEY_TEST_HOME/.ssh/authorized_keys"
+  if add_key_lines admin <<<"$KEY_TEST_KEY"; then return 1; fi
+  [[ ! -s "$KEY_TEST_LOG" && -d "$KEY_TEST_HOME/.ssh/authorized_keys" ]]
+)
+
+test_pubkey_step_propagates_writer_failure() (
+  make_key_fixture || return 1
+  local method
+  for method in 1 2; do
+    (
+      ask() {
+        case "$1" in
+          要给哪个用户添加公钥) REPLY='admin' ;;
+          选择) REPLY="$method" ;;
+          *) REPLY="$KEY_TEST_KEY" ;;
+        esac
+      }
+      curl() { printf '%s\n' "$KEY_TEST_KEY"; }
+      add_key_lines() { return 1; }
+      has_keys() { printf 'unexpected readback after write failure\n' >&2; exit 99; }
+      if step_pubkey >/dev/null; then return 1; fi
+      [[ ! -s "$KEY_TEST_LOG" ]]
+    ) || return 1
+  done
+)
+
 test_timezone_default_and_menu_match() (
   [[ "$DEFAULT_TZ" == Asia/Singapore ]] \
     && menu | grep -qF '设置时区 (默认 Asia/Singapore)'
