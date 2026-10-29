@@ -340,7 +340,7 @@ step_update() {
   ok "系统更新完成"
 }
 
-# ---------- 2. 添加公钥 ----------
+# ---------- 3. 添加公钥 ----------
 add_key_lines() { # add_key_lines user  (从 stdin 读公钥)
   local user="$1" home grp line tmp
   home=$(getent passwd "$user" | cut -d: -f6); grp=$(id -gn "$user")
@@ -361,7 +361,7 @@ add_key_lines() { # add_key_lines user  (从 stdin 读公钥)
 }
 step_pubkey() {
   ask "要给哪个用户添加公钥" "root"; local user="$REPLY"
-  id "$user" >/dev/null 2>&1 || { err "用户 $user 不存在 (可先用菜单 3 创建)"; return 1; }
+  id "$user" >/dev/null 2>&1 || { err "用户 $user 不存在 (可先用菜单 4 创建)"; return 1; }
   echo "  1) 粘贴公钥内容 (例如 ssh-ed25519 AAAA... 本机 ~/.ssh/id_ed25519.pub 的内容)"
   echo "  2) 从 GitHub 拉取 (https://github.com/<用户名>.keys)"
   ask "选择" "1"
@@ -376,7 +376,7 @@ step_pubkey() {
   has_keys "$user" && ok "$user 的 authorized_keys 有效" || warn "$user 仍没有有效公钥"
 }
 
-# ---------- 3. 创建 admin ----------
+# ---------- 4. 创建 admin ----------
 ADMIN_USER=""
 step_admin() {
   ask "管理员用户名" "$DEFAULT_ADMIN"; local u="$REPLY"
@@ -404,7 +404,7 @@ step_admin() {
   has_keys "$u" && ok "$u 可用密钥登录 (公钥已就绪)"
 }
 
-# ---------- 4. 修改 SSH 端口 ----------
+# ---------- 5. 修改 SSH 端口 ----------
 PENDING_OLD_PORTS=""
 SELECTED_SSH_PORT=""
 remove_old_ports() { # remove_old_ports "p1 p2" keep
@@ -464,11 +464,11 @@ step_port() { # step_port [defer]
   if confirm "新端口 $new 登录测试成功了吗? 成功则关闭旧端口 $olds" n; then
     remove_old_ports "$olds" "$new"
   else
-    warn "旧端口 $olds 仍保留, 测试成功后可再次运行菜单 4 (输入 $new) 来关闭"
+    warn "旧端口 $olds 仍保留, 测试成功后可再次运行菜单 5 (输入 $new) 来关闭"
   fi
 }
 
-# ---------- 5. UFW ----------
+# ---------- 6. UFW ----------
 ufw_allow_ssh() {
   LC_ALL=C ufw allow "$1/tcp" comment SSH >/dev/null || { err "UFW 放行 $1/tcp 失败"; return 1; }
   ok "UFW 已放行 $1/tcp"
@@ -493,7 +493,7 @@ step_ufw() {
   ufw status
 }
 
-# ---------- 6. fail2ban ----------
+# ---------- 7. fail2ban ----------
 f2b_content() {
   local ports; ports=$(ssh_ports | paste -sd, -)
   cat <<EOT
@@ -528,14 +528,14 @@ step_fail2ban() {
   fail2ban-client status sshd 2>/dev/null || warn "fail2ban sshd jail 未就绪, 请检查: journalctl -u fail2ban"
 }
 
-# ---------- 7. 禁用密码登录 ----------
+# ---------- 10. 禁用密码登录 ----------
 step_nopass() {
   if [[ "$(sshd_val passwordauthentication)" == no && "$(sshd_val kbdinteractiveauthentication)" == no \
         && "$(sshd_val pubkeyauthentication)" == yes ]]; then
     sshd_verify_policy PubkeyAuthentication yes PasswordAuthentication no KbdInteractiveAuthentication no || return 1
     skip "密码登录已禁用"; return 0; fi
   local users; users=$(login_users_with_keys | tr '\n' ' ')
-  [[ -z "$users" ]] && { err "没有任何用户配置了有效公钥, 拒绝禁用密码登录 (先用菜单 2)"; return 1; }
+  [[ -z "$users" ]] && { err "没有任何用户配置了有效公钥, 拒绝禁用密码登录 (先用菜单 3)"; return 1; }
   info "已配置公钥的用户: $users"
   confirm "你确认已经用密钥成功登录过吗?" n || { warn "已取消"; return 1; }
   sshd_begin_change || return 1
@@ -546,14 +546,14 @@ step_nopass() {
   ok "已禁用密码登录 (仅允许密钥)"
 }
 
-# ---------- 8. 禁用 root 登录 ----------
+# ---------- 11. 禁用 root 登录 ----------
 step_noroot() {
   if [[ "$(sshd_val permitrootlogin)" == no ]]; then
     sshd_verify_policy PermitRootLogin no || return 1
     skip "root 登录已禁用"; return 0
   fi
   local cands; cands=$(sudo_users_with_keys | tr '\n' ' '); cands="${cands% }"
-  [[ -z "$cands" ]] && { err "没有带公钥的 sudo 用户, 拒绝禁用 root (先用菜单 3)"; return 1; }
+  [[ -z "$cands" ]] && { err "没有带公钥的 sudo 用户, 拒绝禁用 root (先用菜单 4)"; return 1; }
   local def="${ADMIN_USER:-${cands%% *}}"
   info "可用的 sudo 用户: $cands"
   ask "保留登录的用户 (将写入 AllowUsers)" "$def"; local u="$REPLY"
@@ -568,7 +568,7 @@ step_noroot() {
   elif confirm "是否同时锁定 root 密码 (passwd -l root)?" y; then passwd -l root >/dev/null && ok "root 密码已锁定"; fi
 }
 
-# ---------- 9. 时区 ----------
+# ---------- 2. 时区 ----------
 step_tz() {
   local cur; cur=$(timedatectl show -p Timezone --value 2>/dev/null || cat /etc/timezone 2>/dev/null)
   info "当前时区: ${cur:-未知}"
@@ -579,7 +579,7 @@ step_tz() {
   ok "时区已设为 $tz ($(date '+%F %T %Z'))"
 }
 
-# ---------- 10. swap ----------
+# ---------- 8. swap ----------
 step_swap() {
   if [[ -n "$(swapon --show --noheadings 2>/dev/null)" ]]; then
     skip "已有 swap:"; swapon --show
@@ -606,7 +606,7 @@ step_swap() {
   else echo "vm.swappiness = 10" >"$SWAP_SYSCTL"; sysctl -q -p "$SWAP_SYSCTL" && ok "swappiness = 10"; fi
 }
 
-# ---------- 11. TCP 调优 ----------
+# ---------- 9. TCP 调优 ----------
 step_tcp() {
   modprobe tcp_bbr 2>/dev/null || true
   if ! grep -qw bbr /proc/sys/net/ipv4/tcp_available_congestion_control; then
@@ -629,22 +629,22 @@ step_all() {
   PENDING_OLD_PORTS=""
   SELECTED_SSH_PORT=""
   run_step "1. 系统更新" step_update
-  run_step "9. 时区" step_tz
-  run_step "2. 添加公钥" step_pubkey
-  run_step "3. 创建管理员" step_admin
-  run_step "4. 修改 SSH 端口" step_port defer || return 1
-  run_step "5. UFW" step_ufw || return 1
-  run_step "6. fail2ban" step_fail2ban
-  run_step "10. swap" step_swap
-  run_step "11. TCP 调优" step_tcp
+  run_step "2. 时区" step_tz
+  run_step "3. 添加公钥" step_pubkey
+  run_step "4. 创建管理员" step_admin
+  run_step "5. 修改 SSH 端口" step_port defer || return 1
+  run_step "6. UFW" step_ufw || return 1
+  run_step "7. fail2ban" step_fail2ban
+  run_step "8. swap" step_swap
+  run_step "9. TCP 调优" step_tcp
   local port="$SELECTED_SSH_PORT" u="${ADMIN_USER:-root}"
   [[ -n "$port" ]] || { err "未确认目标 SSH 端口, 停止后续收紧操作"; return 1; }
   echo
   warn "接下来会禁用密码登录、禁用 root、关闭旧端口。"
   warn "请先另开一个窗口测试:  ssh -p $port $u@$(public_ip)   并执行 sudo -i"
-  if ! confirm "测试成功, 继续?" n; then warn "已停止。测试通过后可单独运行 7 / 8 / 4"; summary; return 0; fi
-  run_step "7. 禁用密码登录" step_nopass || return 1
-  run_step "8. 禁用 root 登录" step_noroot || return 1
+  if ! confirm "测试成功, 继续?" n; then warn "已停止。测试通过后可单独运行 10 / 11 / 5"; summary; return 0; fi
+  run_step "10. 禁用密码登录" step_nopass || return 1
+  run_step "11. 禁用 root 登录" step_noroot || return 1
   if [[ -n "$PENDING_OLD_PORTS" ]]; then
     echo; run_step "关闭旧端口" remove_old_ports "$PENDING_OLD_PORTS" "$port"
   fi
@@ -692,16 +692,16 @@ menu() {
 
 ${c_grn}======= VPS-QuickSetup =======${c_off}
  1. 系统更新 + 基础工具
- 2. 添加公钥 (启用密钥登录)
- 3. 创建 admin 用户
- 4. 修改 SSH 端口 (默认 $DEFAULT_PORT)
- 5. 安装 UFW
- 6. 安装 fail2ban
- 7. 禁用密码登录
- 8. 禁用 root 登录
- 9. 设置时区 (默认 $DEFAULT_TZ)
-10. 设置 swap
-11. TCP 调优 (BBR)
+ 2. 设置时区 (默认 $DEFAULT_TZ)
+ 3. 添加公钥 (启用密钥登录)
+ 4. 创建 admin 用户
+ 5. 修改 SSH 端口 (默认 $DEFAULT_PORT)
+ 6. 安装 UFW
+ 7. 安装 fail2ban
+ 8. 设置 swap
+ 9. TCP 调优 (BBR)
+10. 禁用密码登录
+11. 禁用 root 登录
 12. ALL (按安全顺序执行)
 13. 查看当前状态
  0. 退出
@@ -717,9 +717,9 @@ main() {
     menu
     ask "请选择" ""
     case "$REPLY" in
-      1) step_update ;;  2) step_pubkey ;;  3) step_admin ;;   4) step_port ;;
-      5) step_ufw ;;     6) step_fail2ban ;; 7) step_nopass ;;  8) step_noroot ;;
-      9) step_tz ;;     10) step_swap ;;    11) step_tcp ;;    12) step_all ;;
+      1) step_update ;;  2) step_tz ;;      3) step_pubkey ;;  4) step_admin ;;
+      5) step_port ;;    6) step_ufw ;;     7) step_fail2ban ;; 8) step_swap ;;
+      9) step_tcp ;;    10) step_nopass ;; 11) step_noroot ;; 12) step_all ;;
       13) summary ;;     0|q|Q) echo "再见"; exit 0 ;;
       *) warn "无效选项" ;;
     esac

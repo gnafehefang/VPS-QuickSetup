@@ -33,6 +33,87 @@ test_timezone_step_uses_configured_default() (
   return 1
 )
 
+mock_setup_steps() {
+  step_update() { calls+='1 '; }
+  step_tz() { calls+='2 '; }
+  step_pubkey() { calls+='3 '; }
+  step_admin() { calls+='4 '; ADMIN_USER='admin'; }
+  step_port() { calls+='5 '; port_mode="${1:-}"; SELECTED_SSH_PORT=6090; PENDING_OLD_PORTS=22; }
+  step_ufw() { calls+='6 '; }
+  step_fail2ban() { calls+='7 '; }
+  step_swap() { calls+='8 '; }
+  step_tcp() { calls+='9 '; }
+  step_nopass() { calls+='10 '; }
+  step_noroot() { calls+='11 '; }
+  summary() { calls+='13 '; }
+}
+
+test_menu_displays_safe_order() (
+  local actual expected
+  actual=$(menu | sed -n 's/^ *\([0-9][0-9]*\. .*\)$/\1/p')
+  expected=$(printf '%s\n' \
+    '1. 系统更新 + 基础工具' \
+    "2. 设置时区 (默认 $DEFAULT_TZ)" \
+    '3. 添加公钥 (启用密钥登录)' \
+    '4. 创建 admin 用户' \
+    "5. 修改 SSH 端口 (默认 $DEFAULT_PORT)" \
+    '6. 安装 UFW' \
+    '7. 安装 fail2ban' \
+    '8. 设置 swap' \
+    '9. TCP 调优 (BBR)' \
+    '10. 禁用密码登录' \
+    '11. 禁用 root 登录' \
+    '12. ALL (按安全顺序执行)' \
+    '13. 查看当前状态' \
+    '0. 退出')
+  [[ "$actual" == "$expected" ]]
+)
+
+test_menu_dispatch_matches_safe_order() (
+  mock_setup_steps
+  step_all() { calls+='12 '; }
+  need_root() { :; }
+  check_os() { :; }
+  menu() { :; }
+  local choice
+  for choice in {1..13}; do
+    (
+      local calls='' asked=no port_mode=''
+      ask() {
+        if [[ "$asked" == no ]]; then REPLY="$choice"; asked=yes
+        else [[ "$calls" == "$choice " ]]; exit "$?"; fi
+      }
+      main >/dev/null
+    ) || return 1
+  done
+)
+
+test_all_numbers_and_pause_match_safe_order() (
+  local calls='' labels='' port_mode=''
+  mock_setup_steps
+  public_ip() { printf '192.0.2.1\n'; }
+  confirm() { calls+='pause '; [[ "$2" == n ]]; }
+  run_step() { labels+="${1%%.*} "; shift; "$@"; }
+  remove_old_ports() { calls+='close '; [[ "$1" == 22 && "$2" == 6090 ]]; }
+  step_all >/dev/null || return 1
+  [[ "$calls" == '1 2 3 4 5 6 7 8 9 pause 10 11 close 13 ' \
+    && "$labels" == '1 2 3 4 5 6 7 8 9 10 11 关闭旧端口 ' \
+    && "$port_mode" == defer ]]
+)
+
+test_all_cancel_preserves_login_and_old_ports() (
+  local calls='' port_mode='' warnings=''
+  mock_setup_steps
+  public_ip() { printf '192.0.2.1\n'; }
+  confirm() { calls+='pause '; return 1; }
+  warn() { warnings+="$*"; }
+  remove_old_ports() { calls+='close '; }
+  step_all >/dev/null || return 1
+  [[ "$calls" == '1 2 3 4 5 6 7 8 9 pause 13 ' \
+    && "$warnings" == *'10 / 11 / 5'* \
+    && "$PENDING_OLD_PORTS" == 22 && "$port_mode" == defer ]]
+)
+
 make_ssh_fixture() {
   local dir
   dir=$(mktemp -d "$TEST_TMP/ssh.XXXXXX") || return 1

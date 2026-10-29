@@ -15,17 +15,17 @@ bash <(curl -fsSL https://raw.githubusercontent.com/gnafehefang/VPS-QuickSetup/m
 | 选项 | 功能 | 说明 |
 |---|---|---|
 | 1 | 系统更新 + 基础工具 | `apt update && apt upgrade`，安装 curl wget sudo 等 |
-| 2 | 添加公钥 | 粘贴公钥，或从 `https://github.com/<用户名>.keys` 拉取；用 `ssh-keygen -l` 校验，重复的不加 |
-| 3 | 创建 admin 用户 | 默认用户名 `admin`，复制 root 的公钥，加入 sudo 组，可选免密 sudo（`/etc/sudoers.d/90-<用户>`，visudo 校验） |
-| 4 | 修改 SSH 端口 | 回车默认 6090；UFW 已启用时先放行新端口；过渡期同时保留旧端口，确认新端口能登录后再关闭旧端口（sshd + UFW）；自动处理 `ssh.socket` |
-| 5 | 安装 UFW | 启用前自动放行当前 SSH 端口，默认拒绝入站 |
-| 6 | 安装 fail2ban | `/etc/fail2ban/jail.d/sshd.local`：端口跟随 SSH，systemd 后端，10 分钟内失败 5 次封 1 小时 |
-| 7 | 禁用密码登录 | 没有任何用户配置有效公钥时拒绝执行，并要求确认已测试密钥登录 |
-| 8 | 禁用 root 登录 | 需要一个带公钥的 sudo 用户；写入 `PermitRootLogin no` + `AllowUsers <用户>`，可选锁定 root 密码 |
-| 9 | 设置时区 | 回车默认 `Asia/Singapore` |
-| 10 | 设置 swap | 已有 swap 则跳过；内存 <2G 建 2G，2–4G 与内存相同，>4G 建 4G；`swappiness=10` |
-| 11 | TCP 调优 | 开启 BBR + fq + `tcp_mtu_probing=1` |
-| 12 | ALL | 按安全顺序：1 → 9 → 2 → 3 → 4 → 5 → 6 → 10 → 11 → **暂停，另开窗口测试新端口 + admin 登录** → 7 → 8 → 关闭旧端口 |
+| 2 | 设置时区 | 回车默认 `Asia/Singapore` |
+| 3 | 添加公钥 | 粘贴公钥，或从 `https://github.com/<用户名>.keys` 拉取；用 `ssh-keygen -l` 校验，重复的不加 |
+| 4 | 创建 admin 用户 | 默认用户名 `admin`，复制 root 的公钥，加入 sudo 组，可选免密 sudo（`/etc/sudoers.d/90-<用户>`，visudo 校验） |
+| 5 | 修改 SSH 端口 | 回车默认 6090；UFW 已启用时先放行新端口；过渡期同时保留旧端口，确认新端口能登录后再关闭旧端口（sshd + UFW）；自动处理 `ssh.socket` |
+| 6 | 安装 UFW | 启用前自动放行当前 SSH 端口，默认拒绝入站 |
+| 7 | 安装 fail2ban | `/etc/fail2ban/jail.d/sshd.local`：端口跟随 SSH，systemd 后端，10 分钟内失败 5 次封 1 小时 |
+| 8 | 设置 swap | 已有 swap 则跳过；内存 <2G 建 2G，2–4G 与内存相同，>4G 建 4G；`swappiness=10` |
+| 9 | TCP 调优 | 开启 BBR + fq + `tcp_mtu_probing=1` |
+| 10 | 禁用密码登录 | 没有任何用户配置有效公钥时拒绝执行，并要求确认已测试密钥登录 |
+| 11 | 禁用 root 登录 | 需要一个带公钥的 sudo 用户；写入 `PermitRootLogin no` + `AllowUsers <用户>`，可选锁定 root 密码 |
+| 12 | ALL | 按安全顺序：1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → **暂停，另开窗口测试新端口 + admin 登录** → 10 → 11 → 关闭旧端口 |
 | 13 | 查看当前状态 | 端口、登录用户、UFW、fail2ban，并给出本机 `~/.ssh/config` 片段 |
 | 0 | 退出 | |
 
@@ -38,7 +38,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/gnafehefang/VPS-QuickSetup/m
 - 临时快照、配置复制或持久备份失败时拒绝修改 SSH；同一轮运行保留每个文件的首份持久备份。恢复时先在目标文件系统完整暂存，再替换配置，暂存失败不删除现有目录；缺失目录会按原状态恢复。未完成恢复的快照不会被下一次操作覆盖。受管主配置或目录使用符号链接时需人工处理。
 - 禁用密码 / 禁用 root 前都会检查公钥并要求确认已测试登录。
 - 收紧登录前用 `sshd -T` 和当前连接参数对应的 `sshd -T -C` 核对 root、带公钥用户的有效策略；若存在 `Match` 或非标准 `Include`，拒绝自动收紧，需先人工审查。已有其他 `AllowUsers` 条目导致“只允许所选用户”无法成立时也会回滚。
-- **执行 7、8、关闭旧端口前，务必另开一个终端窗口测试登录成功，当前窗口不要关。**
+- **执行 10、11、关闭旧端口前，务必另开一个终端窗口测试登录成功，当前窗口不要关。**
 
 ## 生成的文件
 
