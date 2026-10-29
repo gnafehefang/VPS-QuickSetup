@@ -492,6 +492,181 @@ test_pubkey_step_propagates_writer_failure() (
   done
 )
 
+test_sshd_val_preserves_all_allowusers_values() (
+  SSHD_RUN_DIR=$(mktemp -d) || return 1
+  sshd() { printf 'permitrootlogin no\nallowusers admin other\nallowusers third\n'; }
+  [[ "$(sshd_val allowusers)" == 'admin other third' && "$(sshd_val permitrootlogin)" == no ]]
+)
+
+test_sshd_val_rejects_partial_dump_on_failure() (
+  SSHD_RUN_DIR=$(mktemp -d) || return 1
+  sshd() { printf 'allowusers admin\n'; return 1; }
+  local output
+  if output=$(sshd_val allowusers); then return 1; fi
+  [[ -z "$output" ]]
+)
+
+make_noroot_fixture() {
+  ADMIN_USER='admin'
+  NOROOT_TEST_ROOT=no
+  NOROOT_TEST_ALLOW=''
+  NOROOT_TEST_CALLS=''
+  NOROOT_TEST_CANDS='admin'
+  NOROOT_TEST_VERIFY_FAIL=no
+  sudo_users_with_keys() { printf '%s\n' "$NOROOT_TEST_CANDS"; }
+  sshd_val() {
+    case "$1" in
+      permitrootlogin) printf '%s\n' "$NOROOT_TEST_ROOT" ;;
+      allowusers) printf '%s\n' "$NOROOT_TEST_ALLOW" ;;
+      *) return 1 ;;
+    esac
+  }
+  sshd_verify_policy() {
+    NOROOT_TEST_CALLS+="verify:$*;"
+    [[ "$NOROOT_TEST_VERIFY_FAIL" == no ]]
+  }
+  ask() { NOROOT_TEST_CALLS+='ask;'; REPLY='admin'; }
+  confirm() { NOROOT_TEST_CALLS+='confirm;'; return 0; }
+  ssh_ports() { printf '6090\n'; }
+  sshd_begin_change() { NOROOT_TEST_CALLS+='begin;'; }
+  qs_set() { NOROOT_TEST_CALLS+="set:$*;"; }
+  sshd_apply() { NOROOT_TEST_CALLS+="apply:$*;"; }
+  passwd() { [[ "$*" == '-S root' ]] && printf 'root L\n'; }
+}
+
+test_noroot_existing_root_ban_still_configures_allowusers() (
+  local existing_allow
+  for existing_allow in '' opc 'admin opc'; do
+    (
+      make_noroot_fixture
+      NOROOT_TEST_ALLOW="$existing_allow"
+      step_noroot >/dev/null || return 1
+      [[ "$NOROOT_TEST_CALLS" == 'ask;confirm;begin;set:PermitRootLogin no;set:AllowUsers admin;apply:reload PermitRootLogin no AllowUsers admin;' \
+        && "$ADMIN_USER" == admin ]]
+    ) || return 1
+  done
+)
+
+test_noroot_skips_only_after_both_policies_are_verified() (
+  make_noroot_fixture
+  NOROOT_TEST_ALLOW='admin'
+  step_noroot || return 1
+  [[ "$NOROOT_TEST_CALLS" == 'verify:PermitRootLogin no AllowUsers admin;' ]]
+)
+
+test_noroot_failed_verification_is_not_successful_skip() (
+  make_noroot_fixture
+  NOROOT_TEST_ALLOW='admin'
+  NOROOT_TEST_VERIFY_FAIL=yes
+  if step_noroot; then return 1; fi
+  [[ "$NOROOT_TEST_CALLS" == 'verify:PermitRootLogin no AllowUsers admin;' ]]
+)
+
+test_noroot_existing_root_ban_requires_keyed_admin() (
+  make_noroot_fixture
+  NOROOT_TEST_CANDS=''
+  if step_noroot; then return 1; fi
+  [[ -z "$NOROOT_TEST_CALLS" ]]
+)
+
+make_summary_login_fixture() {
+  ADMIN_USER=''
+  SUDO_USER=''
+  DEFAULT_ADMIN='admin'
+  SUMMARY_TEST_DUMP=$'port 6090\npermitrootlogin no\npasswordauthentication no\npubkeyauthentication yes\nauthenticationmethods any'
+  SUMMARY_TEST_KEY_USERS='root admin opc'
+  SUMMARY_TEST_SHELL=/bin/bash
+  SUMMARY_TEST_SSHD_FAIL=no
+  sshd_policy_layout_supported() { return 0; }
+  sudo_users_with_keys() { printf 'opc\nadmin\n'; }
+  login_users_with_keys() { printf 'root\nopc\nadmin\n'; }
+  has_keys() { [[ " $SUMMARY_TEST_KEY_USERS " == *" $1 "* ]]; }
+  getent() {
+    [[ "$1" == passwd ]] || return 2
+    case "$2" in
+      root) printf 'root:x:0:0::/root:/bin/bash\n' ;;
+      admin|opc) printf '%s:x:1000:1000::/home/%s:%s\n' "$2" "$2" "$SUMMARY_TEST_SHELL" ;;
+      *) return 2 ;;
+    esac
+  }
+}
+
+test_summary_login_prefers_admin_without_allowusers_or_with_multiple_users() (
+  make_summary_login_fixture
+  [[ "$(summary_login_user "$SUMMARY_TEST_DUMP")" == admin ]] || return 1
+  SUMMARY_TEST_DUMP+=$'\nallowusers opc\nallowusers admin'
+  [[ "$(summary_login_user "$SUMMARY_TEST_DUMP")" == admin ]]
+)
+
+test_summary_login_does_not_recommend_banned_root_or_unlisted_admin() (
+  make_summary_login_fixture
+  SUMMARY_TEST_DUMP+=$'\nallowusers opc'
+  [[ "$(summary_login_user "$SUMMARY_TEST_DUMP")" == opc ]] || return 1
+  SUMMARY_TEST_KEY_USERS=root
+  if summary_login_user "$SUMMARY_TEST_DUMP"; then return 1; fi
+  SUMMARY_TEST_DUMP=${SUMMARY_TEST_DUMP%$'\nallowusers opc'}
+  if summary_login_user "$SUMMARY_TEST_DUMP"; then return 1; fi
+)
+
+test_summary_login_refuses_complex_rules_or_disabled_pubkey() (
+  local restriction
+  for restriction in 'allowusers admin@192.0.2.*' 'denyusers admin' 'allowgroups admins' \
+      'denygroups disabled' 'authenticationmethods publickey,password'; do
+    (
+      make_summary_login_fixture
+      if summary_login_user "$SUMMARY_TEST_DUMP"$'\n'"$restriction"; then return 1; fi
+    ) || return 1
+  done
+  make_summary_login_fixture
+  SUMMARY_TEST_DUMP=${SUMMARY_TEST_DUMP/pubkeyauthentication yes/pubkeyauthentication no}
+  if summary_login_user "$SUMMARY_TEST_DUMP"; then return 1; fi
+  SUMMARY_TEST_DUMP=${SUMMARY_TEST_DUMP/pubkeyauthentication no/pubkeyauthentication yes}
+  sshd_policy_layout_supported() { return 1; }
+  ! summary_login_user "$SUMMARY_TEST_DUMP"
+)
+
+test_summary_login_rejects_missing_keys_and_nonlogin_shells() (
+  make_summary_login_fixture
+  SUMMARY_TEST_KEY_USERS=''
+  if summary_login_user "$SUMMARY_TEST_DUMP"; then return 1; fi
+  SUMMARY_TEST_KEY_USERS='admin'
+  SUMMARY_TEST_SHELL=/usr/sbin/nologin
+  ! summary_login_user "$SUMMARY_TEST_DUMP"
+)
+
+make_summary_fixture() {
+  make_summary_login_fixture
+  local dir
+  dir=$(mktemp -d "$TEST_TMP/summary.XXXXXX") || return 1
+  SSHD_RUN_DIR="$dir/run"
+  BACKUP_DIR="$dir/absent-backup"
+  SUMMARY_TEST_OUTPUT="$dir/output"
+  sshd() { printf '%s\n' "$SUMMARY_TEST_DUMP"; [[ "$SUMMARY_TEST_SSHD_FAIL" == no ]]; }
+  hostname() { printf 'Host20261029\n'; }
+  public_ip() { printf '192.0.2.1\n'; }
+  timedatectl() { printf 'Asia/Singapore\n'; }
+  swapon() { :; }
+  sysctl() { printf 'test\n'; }
+  ufw() { printf 'Status: active\n'; }
+  fail2ban-client() { printf 'Status for the jail: sshd\n'; }
+}
+
+test_summary_uses_admin_and_explains_missing_allowusers() (
+  make_summary_fixture || return 1
+  summary >"$SUMMARY_TEST_OUTPUT" || return 1
+  grep -qx '    User admin' "$SUMMARY_TEST_OUTPUT" \
+    && grep -qF '没有用户名白名单' "$SUMMARY_TEST_OUTPUT" \
+    && ! grep -qx '    User root' "$SUMMARY_TEST_OUTPUT"
+)
+
+test_summary_failed_dump_does_not_generate_login_example() (
+  make_summary_fixture || return 1
+  SUMMARY_TEST_SSHD_FAIL=yes
+  summary >"$SUMMARY_TEST_OUTPUT" || return 1
+  grep -qF '未知 (读取失败)' "$SUMMARY_TEST_OUTPUT" \
+    && ! grep -q '^    User ' "$SUMMARY_TEST_OUTPUT"
+)
+
 test_timezone_default_and_menu_match() (
   [[ "$DEFAULT_TZ" == Asia/Singapore ]] \
     && menu | grep -qF '设置时区 (默认 Asia/Singapore)'

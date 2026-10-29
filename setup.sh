@@ -86,7 +86,14 @@ apt_install() { # apt_install pkg...
 ssh_svc() {
   if systemctl list-unit-files ssh.service >/dev/null 2>&1 && systemctl cat ssh.service >/dev/null 2>&1; then echo ssh; else echo sshd; fi
 }
-sshd_val() { mkdir -p "$SSHD_RUN_DIR"; sshd -T 2>/dev/null | awk -v k="$1" '$1==k{print $2; exit}'; }
+sshd_dump_val() { # sshd_dump_val dump key (保留多值及重复指令中的全部值)
+  awk -v k="${2,,}" '$1==k{for(i=2;i<=NF;i++) print $i}' <<<"$1" | paste -sd' ' -
+}
+sshd_val() {
+  local dump
+  mkdir -p "$SSHD_RUN_DIR" && dump=$(sshd -T 2>/dev/null) || return 1
+  sshd_dump_val "$dump" "$1"
+}
 ssh_ports() { mkdir -p "$SSHD_RUN_DIR"; sshd -T 2>/dev/null | awk '$1=="port"{print $2}' | sort -un; }
 
 backup_file() {
@@ -630,13 +637,15 @@ step_nopass() {
 
 # ---------- 11. 禁用 root 登录 ----------
 step_noroot() {
-  if [[ "$(sshd_val permitrootlogin)" == no ]]; then
-    sshd_verify_policy PermitRootLogin no || return 1
-    skip "root 登录已禁用"; return 0
-  fi
   local cands; cands=$(sudo_users_with_keys | tr '\n' ' '); cands="${cands% }"
   [[ -z "$cands" ]] && { err "没有带公钥的 sudo 用户, 拒绝禁用 root (先用菜单 4)"; return 1; }
   local def="${ADMIN_USER:-${cands%% *}}"
+  if [[ " $cands " == *" $def "* && "$(sshd_val permitrootlogin)" == no \
+      && "$(sshd_val allowusers)" == "$def" ]]; then
+    sshd_verify_policy PermitRootLogin no AllowUsers "$def" || return 1
+    ADMIN_USER="$def"
+    skip "root 登录已禁用, 只允许 $def"; return 0
+  fi
   info "可用的 sudo 用户: $cands"
   ask "保留登录的用户 (将写入 AllowUsers)" "$def"; local u="$REPLY"
   [[ " $cands " == *" $u "* ]] || { err "$u 不是带公钥的 sudo 用户"; return 1; }
@@ -645,6 +654,7 @@ step_noroot() {
   sshd_begin_change || return 1
   if ! { qs_set PermitRootLogin no && qs_set AllowUsers "$u"; }; then sshd_abort_change; return 1; fi
   sshd_apply reload PermitRootLogin no AllowUsers "$u" || return 1
+  ADMIN_USER="$u"
   ok "已禁用 root 登录, 只允许 $u"
   if passwd -S root 2>/dev/null | awk '{exit !($2=="L")}'; then skip "root 密码已锁定"
   elif confirm "是否同时锁定 root 密码 (passwd -l root)?" y; then passwd -l root >/dev/null && ok "root 密码已锁定"; fi
@@ -793,17 +803,52 @@ public_ip() {
   [[ -z "$ip" ]] && ip=$(hostname -I 2>/dev/null | awk '{print $1}')
   echo "${ip:-<服务器IP>}"
 }
+summary_login_user() { # 仅为简单、可核对的密钥认证策略生成示例, 不猜测复杂准入规则。
+  local dump="$1" allow candidate entry found uid home sh key
+  [[ -n "$dump" && "$(sshd_dump_val "$dump" pubkeyauthentication)" == yes ]] || return 1
+  sshd_policy_layout_supported >/dev/null 2>&1 || return 1
+  for key in denyusers allowgroups denygroups; do
+    [[ -z "$(sshd_dump_val "$dump" "$key")" ]] || return 1
+  done
+  case "$(sshd_dump_val "$dump" authenticationmethods)" in ''|any|publickey) ;; *) return 1 ;; esac
+  allow=$(sshd_dump_val "$dump" allowusers)
+  [[ -z "$allow" || "$allow" =~ ^[a-zA-Z0-9_\ -]+$ ]] || return 1
+  for candidate in "${ADMIN_USER:-}" "$DEFAULT_ADMIN" "${SUDO_USER:-}" $(sudo_users_with_keys) $(login_users_with_keys); do
+    [[ "$candidate" =~ ^[a-zA-Z_][a-zA-Z0-9_-]*$ ]] || continue
+    [[ -z "$allow" || " $allow " == *" $candidate "* ]] || continue
+    entry=$(getent passwd "$candidate") || continue
+    IFS=: read -r found _ uid _ _ home sh <<<"$entry"
+    [[ "$found" == "$candidate" && "$uid" =~ ^[0-9]+$ && "$home" == /* && "$home" != / \
+        && -n "$sh" && "$sh" != */nologin && "$sh" != */false ]] || continue
+    if [[ "$uid" == 0 ]]; then
+      [[ "$candidate" == root ]] || continue
+      case "$(sshd_dump_val "$dump" permitrootlogin)" in yes|prohibit-password|without-password) ;; *) continue ;; esac
+    fi
+    has_keys "$candidate" || continue
+    printf '%s\n' "$candidate"
+    return 0
+  done
+  return 1
+}
 summary() {
-  local port user ip
-  port=$(ssh_ports | head -1)
-  user=$(sshd_val allowusers); [[ -z "$user" ]] && user=root
+  local port user ip dump="" ports allow
+  if ! { mkdir -p "$SSHD_RUN_DIR" && dump=$(sshd -T 2>/dev/null); }; then
+    dump=""
+    warn "无法读取 SSH 有效配置, 不生成登录示例"
+  fi
+  ports=$(sshd_dump_val "$dump" port)
+  read -r port _ <<<"$ports"
+  user=$(summary_login_user "$dump") || user=""
+  allow=$(sshd_dump_val "$dump" allowusers)
+  if [[ -z "$dump" ]]; then allow="未知 (读取失败)"
+  elif [[ -z "$allow" ]]; then allow="未设置 (没有用户名白名单, 不代表仅允许 admin)"; fi
   ip=$(public_ip)
   echo; echo "${c_grn}================ 当前状态 ================${c_off}"
   echo "主机名         : $(hostname)"
-  echo "SSH 端口       : $(ssh_ports | paste -sd' ' -)"
-  echo "root 登录      : $(sshd_val permitrootlogin)"
-  echo "密码登录       : $(sshd_val passwordauthentication)"
-  echo "AllowUsers     : $(sshd_val allowusers)"
+  echo "SSH 端口       : ${ports:-未知}"
+  echo "root 登录      : $(sshd_dump_val "$dump" permitrootlogin)"
+  echo "密码登录       : $(sshd_dump_val "$dump" passwordauthentication)"
+  echo "AllowUsers     : $allow"
   echo "带公钥的用户   : $(login_users_with_keys | paste -sd' ' -)"
   echo "时区           : $(timedatectl show -p Timezone --value 2>/dev/null)"
   echo "swap           : $(swapon --show=NAME,SIZE --noheadings 2>/dev/null | paste -sd' ' -)"
@@ -813,14 +858,19 @@ summary() {
   echo "--- fail2ban ---"
   if command -v fail2ban-client >/dev/null; then fail2ban-client status sshd 2>/dev/null || echo "sshd jail 未运行"; else echo "未安装"; fi
   echo; echo "本机 ~/.ssh/config 可添加:"
-  cat <<EOT
+  if [[ -n "$user" && -n "$port" ]]; then
+    cat <<EOT
 Host $(hostname)
     HostName $ip
     Port $port
     User $user
     IdentityFile ~/.ssh/id_ed25519
 EOT
+  else
+    warn "未确认可用的密钥登录用户或端口, 不猜测 User root; 请核对账户、公钥及 SSH 准入规则"
+  fi
   [[ -d "$BACKUP_DIR" ]] && echo "配置备份目录: $BACKUP_DIR"
+  return 0
 }
 
 menu() {
