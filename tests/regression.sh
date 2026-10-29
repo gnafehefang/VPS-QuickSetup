@@ -648,6 +648,8 @@ make_summary_fixture() {
   swapon() { :; }
   sysctl() { printf 'test\n'; }
   ufw() { printf 'Status: active\n'; }
+  ss() { printf 'Netid State Local Address:Port\ntcp LISTEN 0.0.0.0:6090\n'; }
+  summary_accounts() { :; }
   fail2ban-client() { printf 'Status for the jail: sshd\n'; }
 }
 
@@ -665,6 +667,92 @@ test_summary_failed_dump_does_not_generate_login_example() (
   summary >"$SUMMARY_TEST_OUTPUT" || return 1
   grep -qF '未知 (读取失败)' "$SUMMARY_TEST_OUTPUT" \
     && ! grep -q '^    User ' "$SUMMARY_TEST_OUTPUT"
+)
+
+make_account_report_fixture() {
+  make_key_fixture || return 1
+  ACCOUNT_TEST_DIR="$KEY_TEST_HOME/accounts"
+  ACCOUNT_TEST_OPC_HOME="$ACCOUNT_TEST_DIR/opc"
+  ACCOUNT_TEST_EXTRA=''
+  ACCOUNT_TEST_OUTPUT="$ACCOUNT_TEST_DIR/output"
+  mkdir -p "$ACCOUNT_TEST_DIR"/{root,admin,ubuntu}/.ssh "$ACCOUNT_TEST_OPC_HOME" "$ACCOUNT_TEST_DIR/service" || return 1
+  ssh-keygen -q -t ed25519 -N '' -f "$ACCOUNT_TEST_DIR/second-key" || return 1
+  local second
+  second=$(<"$ACCOUNT_TEST_DIR/second-key.pub")
+  printf '%s\n' "$KEY_TEST_KEY" >"$ACCOUNT_TEST_DIR/root/.ssh/authorized_keys"
+  printf '%s\n%s duplicate-comment\n' "$KEY_TEST_KEY" "$KEY_TEST_KEY" >"$ACCOUNT_TEST_DIR/admin/.ssh/authorized_keys"
+  printf '%s\n%s private-comment-not-for-report\n' "$KEY_TEST_KEY" "$second" >"$ACCOUNT_TEST_DIR/admin/.ssh/authorized_keys2"
+  printf '%s' "$KEY_TEST_KEY" >"$ACCOUNT_TEST_DIR/ubuntu/.ssh/authorized_keys"
+  getent() {
+    [[ "$*" == passwd ]] || return 2
+    printf 'root:x:0:0::%s/root:/bin/bash\nadmin:x:1000:1000::%s/admin:/bin/bash\n' "$ACCOUNT_TEST_DIR" "$ACCOUNT_TEST_DIR"
+    printf 'ubuntu:x:1001:1001::%s/ubuntu:/bin/bash\nopc:x:1002:1002::%s:/bin/bash\n' "$ACCOUNT_TEST_DIR" "$ACCOUNT_TEST_OPC_HOME"
+    printf 'service:x:99:99::%s/service:/usr/sbin/nologin\n%s' "$ACCOUNT_TEST_DIR" "$ACCOUNT_TEST_EXTRA"
+  }
+  warn() { printf 'WARN %s\n' "$*"; }
+}
+
+test_account_report_lists_all_users_and_unique_key_counts() (
+  make_account_report_fixture || return 1
+  cp "$ACCOUNT_TEST_DIR/admin/.ssh/authorized_keys" "$ACCOUNT_TEST_DIR/original" || return 1
+  summary_accounts >"$ACCOUNT_TEST_OUTPUT" || return 1
+  grep -Eq '^root +0 +1 +/bin/bash$' "$ACCOUNT_TEST_OUTPUT" \
+    && grep -Eq '^admin +1000 +2 +/bin/bash$' "$ACCOUNT_TEST_OUTPUT" \
+    && grep -Eq '^ubuntu +1001 +1 +/bin/bash$' "$ACCOUNT_TEST_OUTPUT" \
+    && grep -Eq '^opc +1002 +0 +/bin/bash$' "$ACCOUNT_TEST_OUTPUT" \
+    && grep -Eq '^service +99 +0 +/usr/sbin/nologin$' "$ACCOUNT_TEST_OUTPUT" \
+    && grep -q 'SHA256:' "$ACCOUNT_TEST_OUTPUT" \
+    && ! grep -qF 'private-comment-not-for-report' "$ACCOUNT_TEST_OUTPUT" \
+    && ! grep -qF "${KEY_TEST_KEY#* }" "$ACCOUNT_TEST_OUTPUT" \
+    && cmp -s "$ACCOUNT_TEST_DIR/original" "$ACCOUNT_TEST_DIR/admin/.ssh/authorized_keys"
+)
+
+test_account_report_marks_unverified_sources_unknown() (
+  local state
+  for state in malformed directory read-failure bad-home; do
+    (
+      make_account_report_fixture || return 1
+      mkdir -p "$ACCOUNT_TEST_OPC_HOME/.ssh" || return 1
+      case "$state" in
+        malformed) printf 'not-a-public-key\n' >"$ACCOUNT_TEST_OPC_HOME/.ssh/authorized_keys" ;;
+        directory) mkdir -p "$ACCOUNT_TEST_OPC_HOME/.ssh/authorized_keys" ;;
+        read-failure)
+          printf '%s\n' "$KEY_TEST_KEY" >"$ACCOUNT_TEST_OPC_HOME/.ssh/authorized_keys"
+          ssh-keygen() { [[ "${!#}" != "$ACCOUNT_TEST_OPC_HOME/.ssh/authorized_keys" ]] && command ssh-keygen "$@"; } ;;
+        bad-home) ACCOUNT_TEST_OPC_HOME=/ ;;
+      esac
+      summary_accounts >"$ACCOUNT_TEST_OUTPUT" || return 1
+      grep -Eq '^opc +1002 +0\+\? +/bin/bash$' "$ACCOUNT_TEST_OUTPUT"
+    ) || return 1
+  done
+)
+
+test_account_report_warns_about_additional_uid_zero() (
+  make_account_report_fixture || return 1
+  ACCOUNT_TEST_EXTRA="otherroot:x:0:0::$ACCOUNT_TEST_DIR/service:/bin/bash"$'\n'
+  summary_accounts >"$ACCOUNT_TEST_OUTPUT" 2>&1 || return 1
+  grep -qF 'otherroot 也是 UID 0 账号' "$ACCOUNT_TEST_OUTPUT"
+)
+
+test_account_report_enumeration_failure_is_not_empty_inventory() (
+  getent() { return 2; }
+  local output
+  warn() { printf '%s\n' "$*"; }
+  if output=$(summary_accounts); then return 1; fi
+  [[ "$output" == *'账号清单读取失败'* && "$output" != *ACCOUNT* ]]
+)
+
+test_summary_network_audit_only_reads_rules_and_listeners() (
+  make_summary_fixture || return 1
+  ufw() {
+    [[ "$*" == 'status numbered' ]] || { printf 'unexpected UFW change\n' >&2; exit 99; }
+    printf 'Status: active\n[ 1] 6090/tcp ALLOW IN Anywhere\n[ 2] 59625/tcp ALLOW IN Anywhere\n'
+  }
+  ss() { [[ "$*" == -lntup ]] && printf 'tcp LISTEN 127.0.0.1:59625 users:((service,pid=123))\n'; }
+  summary >"$SUMMARY_TEST_OUTPUT" || return 1
+  grep -qF '[ 2] 59625/tcp' "$SUMMARY_TEST_OUTPUT" \
+    && grep -qF '127.0.0.1:59625' "$SUMMARY_TEST_OUTPUT" \
+    && grep -qF '保留既有规则' "$SUMMARY_TEST_OUTPUT"
 )
 
 test_timezone_default_and_menu_match() (

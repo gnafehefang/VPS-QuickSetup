@@ -27,7 +27,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/gnafehefang/VPS-QuickSetup/m
 | 11 | 禁用 root 登录 | 需要一个带公钥的 sudo 用户；写入 `PermitRootLogin no` + `AllowUsers <用户>`，可选锁定 root 密码；root 已禁用但白名单未设置或不是所选用户时，仍需确认并完成白名单配置 |
 | 12 | 修改 hostname | 输入新主机名；回车默认 `Host` + 当天系统日期（`YYYYMMDD`），如 `Host20261029`；保留大小写，允许 1-63 位字母、数字和连字符，首尾不能是连字符 |
 | 13 | ALL | 按安全顺序：1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → **暂停，另开窗口测试新端口 + admin 登录** → 10 → 11 → 关闭旧端口 → 12 |
-| 14 | 查看当前状态 | 端口、登录用户、UFW、fail2ban，并给出本机 `~/.ssh/config` 片段 |
+| 14 | 查看当前状态 | SSH 策略、全部账号及标准文件中的公钥数/指纹、TCP/UDP 监听、带编号的 UFW 规则、fail2ban，以及可核对的本机 `~/.ssh/config` 片段 |
 | 0 | 退出 | |
 
 ## 防锁死设计
@@ -57,6 +57,26 @@ bash <(curl -fsSL https://raw.githubusercontent.com/gnafehefang/VPS-QuickSetup/m
 修改 hostname 前会备份配置；设置或校验失败时尝试恢复。默认日期在进入该步骤时读取，按 VPS 当前时区计算，不是脚本发布时的固定日期。
 
 脚本里不包含任何密钥或密码，公钥在运行时输入。
+
+## 核查已有账号和端口
+
+脚本只按菜单 4 输入的用户名创建管理员，不会固定创建 `opc` 或 `ubuntu`。它们可能由云镜像、cloud-init 或重装工具预置，但仅凭用户名无法确定来源，也不能据此排除入侵。Linux 正常运行还需要系统服务账号，不应只保留 root 和 admin 两个系统账号；SSH 登录范围应通过经过验证的准入策略限制。
+
+菜单 14 的账号清单包含 `getent passwd` 返回的全部账号，列出 UID、shell，以及各账号标准 `authorized_keys` / `authorized_keys2` 文件中的去重有效公钥数和 SHA256 指纹，不输出公钥注释或私钥。重复公钥按指纹只算一次；`0+?` 等表示还有异常路径、不可读文件或校验失败，不能当作确定没有密钥。非标准公钥文件、`AuthorizedKeysCommand`、用户 CA 及 `Match` 中的其他来源不在统计范围，另显示全局来源配置供核查。公钥文件存在不代表该账号获准 SSH 登录，也不是入侵检测结论。
+
+UFW 步骤保留原有规则，不执行 reset；确认新 SSH 入口可用后，只删除本轮识别的旧 SSH 端口规则。因此其他历史规则或以前运行遗留的端口仍可能存在。菜单 14 将规则和实际监听分别显示，监听还包括回环和系统服务，不代表对应端口可从公网访问，也不能替代云防火墙和完整 netfilter 审计。
+
+发现陌生账号或端口时，先保留当前连接及日志，通过控制台核对镜像/重装记录、cloud-init 配置及日志、认证成功记录，再将清单里的指纹与自己和云控制台配置的公钥比较。只读核查示例：
+
+```bash
+sudo getent passwd
+sudo ss -lntup
+sudo ufw status numbered
+sudo journalctl -u ssh -u sshd --no-pager -n 200
+sudo last -Fai | head -50
+```
+
+确认某条规则确实多余且不会影响当前 SSH 或其他服务后，再按规则编号人工删除并复查 IPv4 / IPv6；不要直接清空防火墙或批量删除用户。账号创建时间不能靠公钥文件时间可靠推定，日志也可能不完整。若存在无法解释的公钥或成功登录记录，应进一步调查；确认失陷时，不要把删除账号或规则当作已恢复可信，应从可信环境保全证据、隔离并从可信镜像重建，轮换相关凭据。核查输出在分享前应隐藏不必要的 IP、用户名及其他敏感信息。
 
 ## 回归测试
 

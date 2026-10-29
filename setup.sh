@@ -830,6 +830,47 @@ summary_login_user() { # 仅为简单、可核对的密钥认证策略生成示�
   done
   return 1
 }
+summary_accounts() {
+  local accounts u uid home sh file key_dump prints fingerprints details issues count
+  accounts=$(getent passwd) && [[ -n "$accounts" ]] || { warn "账号清单读取失败, 不能判断是否存在其他账号"; return 1; }
+  echo "KEYS = ~/.ssh/authorized_keys 和 authorized_keys2 中按指纹去重的有效公钥数; +? 表示有文件未能校验"
+  echo "包含系统服务账号; 有公钥不等于获准 SSH 登录。非标准 AuthorizedKeysFile、命令或 CA 来源不计入。"
+  printf '%-18s %-7s %-7s %s\n' ACCOUNT UID KEYS SHELL
+  while IFS=: read -r u _ uid _ _ home sh; do
+    fingerprints=""; details=""; issues=""
+    if [[ "$home" != /* || "$home" == / || -L "$home" || -L "$home/.ssh" ]]; then
+      issues="主目录为空、为根目录或存在符号链接, 未扫描公钥"
+    else
+      for file in "$home/.ssh/authorized_keys" "$home/.ssh/authorized_keys2"; do
+        [[ -e "$file" || -L "$file" ]] || continue
+        if [[ -L "$file" || ! -f "$file" || ! -r "$file" ]]; then
+          issues+="    无法安全读取: $file"$'\n'; continue
+        fi
+        [[ -s "$file" ]] || continue
+        if ! key_dump=$(ssh-keygen -l -E sha256 -f "$file" 2>/dev/null); then
+          issues+="    读取或公钥校验失败: $file"$'\n'; continue
+        fi
+        prints=$(awk '$1~/^[0-9]+$/ && $2~/^SHA256:[A-Za-z0-9+\/=]+$/ && $NF~/^\([A-Za-z0-9_-]+\)$/ {print $2, $NF}' <<<"$key_dump")
+        if [[ -z "$prints" ]]; then
+          issues+="    未识别有效公钥指纹: $file"$'\n'; continue
+        fi
+        fingerprints+="$prints"$'\n'
+        details+="    文件: $file"$'\n'
+      done
+    fi
+    fingerprints=$(sort -u <<<"$fingerprints" | awk 'NF')
+    count=$(awk 'NF{n++} END{print n+0}' <<<"$fingerprints")
+    [[ -z "$issues" ]] || count+='+?'
+    printf '%-18s %-7s %-7s %s\n' "$u" "$uid" "$count" "${sh:-未设置}"
+    [[ -z "$details" ]] || printf '%s' "$details"
+    if [[ -n "$fingerprints" ]]; then
+      while IFS= read -r prints; do printf '    %s\n' "$prints"; done <<<"$fingerprints"
+    fi
+    [[ -z "$issues" ]] || warn "$issues"
+    if [[ "$uid" =~ ^0+$ && "$u" != root ]]; then err "$u 也是 UID 0 账号, 必须人工核查"; fi
+  done <<<"$accounts"
+  return 0
+}
 summary() {
   local port user ip dump="" ports allow
   if ! { mkdir -p "$SSHD_RUN_DIR" && dump=$(sshd -T 2>/dev/null); }; then
@@ -849,12 +890,22 @@ summary() {
   echo "root 登录      : $(sshd_dump_val "$dump" permitrootlogin)"
   echo "密码登录       : $(sshd_dump_val "$dump" passwordauthentication)"
   echo "AllowUsers     : $allow"
-  echo "带公钥的用户   : $(login_users_with_keys | paste -sd' ' -)"
   echo "时区           : $(timedatectl show -p Timezone --value 2>/dev/null)"
   echo "swap           : $(swapon --show=NAME,SIZE --noheadings 2>/dev/null | paste -sd' ' -)"
   echo "拥塞控制       : $(sysctl -n net.ipv4.tcp_congestion_control) / $(sysctl -n net.core.default_qdisc)"
+  echo; echo "--- 账号与公钥 ---"
+  summary_accounts || true
+  echo "公钥文件配置   : $(sshd_dump_val "$dump" authorizedkeysfile)"
+  echo "公钥查询命令   : $(sshd_dump_val "$dump" authorizedkeyscommand)"
+  echo "用户 CA 配置   : $(sshd_dump_val "$dump" trustedusercakeys)"
+  echo; echo "--- TCP / UDP 监听 ---"
+  if command -v ss >/dev/null; then ss -lntup || warn "读取监听端口失败"
+  else warn "ss 未安装, 无法显示实际监听"; fi
+  echo "以上包含回环和系统服务监听, 不是公网可达性测试。"
+  echo
   echo "--- UFW ---"
-  if command -v ufw >/dev/null; then ufw status; else echo "未安装"; fi
+  if command -v ufw >/dev/null; then LC_ALL=C ufw status numbered || warn "无法读取 UFW 规则"; else echo "未安装"; fi
+  echo "保留既有规则, 不自动清空; 放行端口不等于有进程监听, UFW 也不代表云防火墙或全部 netfilter 规则。"
   echo "--- fail2ban ---"
   if command -v fail2ban-client >/dev/null; then fail2ban-client status sshd 2>/dev/null || echo "sshd jail 未运行"; else echo "未安装"; fi
   echo; echo "本机 ~/.ssh/config 可添加:"
