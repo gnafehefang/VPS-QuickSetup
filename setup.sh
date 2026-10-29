@@ -465,6 +465,15 @@ step_admin() {
   ok "$u 的账户、公钥和 sudo 配置已就绪, 仍需另开窗口测试登录"
 }
 
+admin_login_ready() {
+  local user="${1:-}" uid groups
+  [[ -n "$user" && "$user" != root ]] || { err "未确认非 root 管理员, 请先完成菜单 4"; return 1; }
+  uid=$(id -u "$user") && [[ "$uid" =~ ^[0-9]+$ && "$uid" -ne 0 ]] && has_keys "$user" \
+    || { err "管理员 $user 不存在、UID 无效或没有有效公钥, 停止 ALL"; return 1; }
+  groups=$(id -nG "$user") && [[ " $groups " == *' sudo '* ]] \
+    || { err "管理员 $user 不在 sudo 组, 停止 ALL"; return 1; }
+}
+
 # ---------- 5. 修改 SSH 端口 ----------
 PENDING_OLD_PORTS=""
 SELECTED_SSH_PORT=""
@@ -737,19 +746,22 @@ step_hostname() {
 # ---------- 13. ALL ----------
 run_step() { echo; echo "${c_blu}========== $1 ==========${c_off}"; shift; "$@" || { warn "该步骤未完成"; return 1; }; }
 step_all() {
+  ADMIN_USER=""
   PENDING_OLD_PORTS=""
   SELECTED_SSH_PORT=""
   run_step "1. 系统更新" step_update
   run_step "2. 时区" step_tz
-  run_step "3. 添加公钥" step_pubkey
-  run_step "4. 创建管理员" step_admin
+  run_step "3. 添加公钥" step_pubkey || return 1
+  run_step "4. 创建管理员" step_admin || { ADMIN_USER=""; return 1; }
+  admin_login_ready "$ADMIN_USER" || { ADMIN_USER=""; return 1; }
   run_step "5. 修改 SSH 端口" step_port defer || return 1
   run_step "6. UFW" step_ufw || return 1
   run_step "7. fail2ban" step_fail2ban
   run_step "8. swap" step_swap
   run_step "9. TCP 调优" step_tcp
-  local port="$SELECTED_SSH_PORT" u="${ADMIN_USER:-root}"
+  local port="$SELECTED_SSH_PORT" u="$ADMIN_USER"
   [[ -n "$port" ]] || { err "未确认目标 SSH 端口, 停止后续收紧操作"; return 1; }
+  admin_login_ready "$u" || { ADMIN_USER=""; return 1; }
   echo
   warn "接下来会禁用密码登录、禁用 root、关闭旧端口。"
   warn "请先另开一个窗口测试:  ssh -p $port $u@$(public_ip)   并执行 sudo -i"

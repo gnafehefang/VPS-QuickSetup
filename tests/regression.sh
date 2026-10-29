@@ -515,6 +515,14 @@ test_hostname_failure_restores_absent_static_hostname() (
 )
 
 mock_setup_steps() {
+  id() {
+    case "$*" in
+      '-u admin') printf '1000\n' ;;
+      '-nG admin') printf 'admin sudo\n' ;;
+      *) return 1 ;;
+    esac
+  }
+  has_keys() { [[ "$1" == admin && "${ALL_TEST_KEYS_OK:-yes}" == yes ]]; }
   step_update() { calls+='1 '; }
   step_tz() { calls+='2 '; }
   step_pubkey() { calls+='3 '; }
@@ -597,6 +605,63 @@ test_all_cancel_preserves_login_and_old_ports() (
     && "$PENDING_OLD_PORTS" == 22 && "$port_mode" == defer ]]
 )
 
+test_all_key_failure_stops_before_admin_and_port_changes() (
+  local calls='' port_mode=''
+  mock_setup_steps
+  ADMIN_USER=stale
+  step_pubkey() { calls+='3 '; return 1; }
+  if step_all >/dev/null; then return 1; fi
+  [[ "$calls" == '1 2 3 ' && -z "$ADMIN_USER" && -z "$SELECTED_SSH_PORT" ]]
+)
+
+test_all_admin_failure_stops_before_port_and_firewall_changes() (
+  local calls='' port_mode=''
+  mock_setup_steps
+  step_admin() { calls+='4 '; ADMIN_USER='admin'; return 1; }
+  if step_all >/dev/null; then return 1; fi
+  [[ "$calls" == '1 2 3 4 ' && -z "$ADMIN_USER" && -z "$SELECTED_SSH_PORT" ]]
+)
+
+test_all_rejects_unusable_admin_even_if_step_reports_success() (
+  local reason
+  for reason in unset-name root-name missing-user root-uid missing-key missing-sudo; do
+    (
+      local calls='' port_mode=''
+      mock_setup_steps
+      step_admin() {
+        calls+='4 '
+        case "$reason" in
+          unset-name) ADMIN_USER='' ;;
+          root-name) ADMIN_USER=root ;;
+          *) ADMIN_USER='admin' ;;
+        esac
+      }
+      id() {
+        [[ "$reason" != missing-user ]] || return 1
+        case "$1" in
+          -u) [[ "$reason" == root-uid ]] && printf '0\n' || printf '1000\n' ;;
+          -nG) [[ "$reason" == missing-sudo ]] && printf 'admin\n' || printf 'admin sudo\n' ;;
+          *) return 1 ;;
+        esac
+      }
+      has_keys() { [[ "$reason" != missing-key ]]; }
+      if step_all >/dev/null; then return 1; fi
+      [[ "$calls" == '1 2 3 4 ' && -z "$ADMIN_USER" && -z "$SELECTED_SSH_PORT" ]]
+    ) || return 1
+  done
+)
+
+test_all_rechecks_admin_before_login_test_prompt() (
+  local calls='' port_mode='' ALL_TEST_KEYS_OK=yes
+  mock_setup_steps
+  step_tcp() { calls+='9 '; ALL_TEST_KEYS_OK=no; }
+  confirm() { calls+='unexpected-confirm '; return 0; }
+  public_ip() { printf 'unexpected IP query\n' >&2; exit 99; }
+  if step_all >/dev/null; then return 1; fi
+  [[ "$calls" == '1 2 3 4 5 6 7 8 9 ' && -z "$ADMIN_USER" \
+    && "$PENDING_OLD_PORTS" == 22 && "$SELECTED_SSH_PORT" == 6090 ]]
+)
+
 make_ssh_fixture() {
   local dir
   dir=$(mktemp -d "$TEST_TMP/ssh.XXXXXX") || return 1
@@ -613,6 +678,14 @@ make_ssh_fixture() {
 }
 
 test_all_keeps_selected_lower_port() (
+  id() {
+    case "$1" in
+      -u) printf '1000\n' ;;
+      -nG) printf 'admin sudo\n' ;;
+      *) return 1 ;;
+    esac
+  }
+  has_keys() { [[ "$1" == admin ]]; }
   step_update() { :; }
   step_tz() { :; }
   step_pubkey() { :; }
