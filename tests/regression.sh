@@ -775,9 +775,9 @@ make_summary_fixture() {
 test_summary_uses_admin_and_explains_missing_allowusers() (
   make_summary_fixture || return 1
   summary >"$SUMMARY_TEST_OUTPUT" || return 1
-  grep -qx '    User admin' "$SUMMARY_TEST_OUTPUT" \
+  grep -qx '        User admin' "$SUMMARY_TEST_OUTPUT" \
     && grep -qF '没有用户名白名单' "$SUMMARY_TEST_OUTPUT" \
-    && ! grep -qx '    User root' "$SUMMARY_TEST_OUTPUT"
+    && ! grep -qx '        User root' "$SUMMARY_TEST_OUTPUT"
 )
 
 test_summary_failed_dump_does_not_generate_login_example() (
@@ -785,7 +785,7 @@ test_summary_failed_dump_does_not_generate_login_example() (
   SUMMARY_TEST_SSHD_FAIL=yes
   summary >"$SUMMARY_TEST_OUTPUT" || return 1
   grep -qF '未知 (读取失败)' "$SUMMARY_TEST_OUTPUT" \
-    && ! grep -q '^    User ' "$SUMMARY_TEST_OUTPUT"
+    && ! grep -q '^        User ' "$SUMMARY_TEST_OUTPUT"
 )
 
 make_account_report_fixture() {
@@ -1007,17 +1007,17 @@ test_summary_deduplicates_ports_and_allowusers() (
   make_summary_fixture || return 1
   SUMMARY_TEST_DUMP+=$'\nport 6090\nallowusers admin admin\nallowusers admin'
   summary >"$SUMMARY_TEST_OUTPUT" || return 1
-  grep -qxF 'SSH 端口       : 6090' "$SUMMARY_TEST_OUTPUT" \
-    && grep -qxF "AllowUsers     : ${c_grn}admin${c_off}" "$SUMMARY_TEST_OUTPUT" \
-    && grep -qxF '    User admin' "$SUMMARY_TEST_OUTPUT"
+  grep -qxF '    SSH 端口       : 6090' "$SUMMARY_TEST_OUTPUT" \
+    && grep -qxF "    AllowUsers     : ${c_grn}admin${c_off}" "$SUMMARY_TEST_OUTPUT" \
+    && grep -qxF '        User admin' "$SUMMARY_TEST_OUTPUT"
 )
 
 test_summary_deduplication_still_reports_other_allowed_users() (
   make_summary_fixture || return 1
   SUMMARY_TEST_DUMP+=$'\nport 22222\nallowusers admin other admin'
   summary >"$SUMMARY_TEST_OUTPUT" || return 1
-  grep -qxF 'SSH 端口       : 6090 22222' "$SUMMARY_TEST_OUTPUT" \
-    && grep -qxF "AllowUsers     : ${c_red}admin other${c_off}" "$SUMMARY_TEST_OUTPUT"
+  grep -qxF '    SSH 端口       : 6090 22222' "$SUMMARY_TEST_OUTPUT" \
+    && grep -qxF "    AllowUsers     : ${c_red}admin other${c_off}" "$SUMMARY_TEST_OUTPUT"
 )
 
 test_summary_unsafe_security_values_are_red() (
@@ -1069,7 +1069,7 @@ test_summary_ssh_explanation_starts_after_blank_line() (
   make_summary_fixture || return 1
   summary >"$SUMMARY_TEST_OUTPUT" || return 1
   summary_note_after_blank '以上为全局有效配置' \
-    && grep -qF '       启用密钥认证不代表已验证登录。' "$SUMMARY_TEST_OUTPUT"
+    && grep -qxF '           启用密钥认证不代表已验证登录。' "$SUMMARY_TEST_OUTPUT"
 )
 
 test_summary_listener_explanation_starts_after_blank_line() (
@@ -1082,17 +1082,93 @@ test_summary_firewall_explanation_starts_after_blank_line() (
   make_summary_fixture || return 1
   summary >"$SUMMARY_TEST_OUTPUT" || return 1
   summary_note_after_blank '保留既有规则' \
-    && grep -qF '       UFW 也不代表云防火墙或全部 netfilter 规则。' "$SUMMARY_TEST_OUTPUT"
+    && grep -qxF '           UFW 也不代表云防火墙或全部 netfilter 规则。' "$SUMMARY_TEST_OUTPUT"
 )
 
-test_summary_sections_have_colored_headers_and_blank_lines() (
+test_summary_sections_have_plain_bracket_headers_and_blank_lines() (
   make_summary_fixture || return 1
+  mkdir -p "$BACKUP_DIR" || return 1
   summary >"$SUMMARY_TEST_OUTPUT" || return 1
   local output section
   output=$(<"$SUMMARY_TEST_OUTPUT")
-  for section in 'SSH 全局策略' '账号与公钥' 'TCP / UDP 监听' 'UFW 防火墙' 'fail2ban' '本机 ~/.ssh/config 可添加'; do
-    [[ "$output" == *$'\n\n'"${c_blu}========== $section ==========${c_off}"$'\n'* ]] || return 1
+  for section in '基础信息' 'SSH 全局策略' '账号与公钥' 'TCP / UDP 监听' 'UFW 防火墙' 'fail2ban' '本机 ~/.ssh/config 可添加' '配置备份'; do
+    [[ "$output" == *$'\n\n'"[$section]"$'\n'* ]] || return 1
   done
+  ! grep -q '==========' "$SUMMARY_TEST_OUTPUT"
+)
+
+test_summary_section_bodies_are_indented_and_keep_raw_details() (
+  make_summary_fixture || return 1
+  mkdir -p "$BACKUP_DIR" || return 1
+  summary_accounts() { printf 'admin: 1 把密钥\n    SHA256:ABCDEF********UVWXYZ\n'; }
+  ss() { printf 'tcp LISTEN 127.0.0.1:59625 users:((service,pid=123))\n'; }
+  ufw() { printf 'Status: active\n[ 1] 6090/tcp ALLOW IN Anywhere\n'; }
+  fail2ban-client() { printf 'Status for the jail: sshd\n|- Filter\n|  `- Currently failed: 0\n'; }
+  summary >"$SUMMARY_TEST_OUTPUT" || return 1
+  awk '
+    /^\[/ { sections++; next }
+    sections && NF && !/^    / { bad=1 }
+    END { exit !(sections==8 && !bad) }
+  ' "$SUMMARY_TEST_OUTPUT" \
+    && grep -qxF '        SHA256:ABCDEF********UVWXYZ' "$SUMMARY_TEST_OUTPUT" \
+    && grep -qxF '    tcp LISTEN 127.0.0.1:59625 users:((service,pid=123))' "$SUMMARY_TEST_OUTPUT" \
+    && grep -qxF '    [ 1] 6090/tcp ALLOW IN Anywhere' "$SUMMARY_TEST_OUTPUT" \
+    && grep -qxF '    |  `- Currently failed: 0' "$SUMMARY_TEST_OUTPUT" \
+    && grep -qxF '    Host Host20261029' "$SUMMARY_TEST_OUTPUT" \
+    && grep -qxF '        HostName 192.0.2.1' "$SUMMARY_TEST_OUTPUT" \
+    && grep -qxF "    $BACKUP_DIR" "$SUMMARY_TEST_OUTPUT"
+)
+
+test_summary_account_errors_stay_under_account_heading() (
+  make_summary_fixture || return 1
+  local state
+  for state in failed-inventory uid-zero; do
+    summary_accounts() {
+      if [[ "$state" == failed-inventory ]]; then
+        printf '[注意] 账号清单读取失败, 不能判断是否存在其他账号\n' >&2
+        return 1
+      fi
+      printf 'otherroot: 0 把密钥\n'
+      err 'otherroot 也是 UID 0 账号, 必须人工核查'
+    }
+    summary >"$SUMMARY_TEST_OUTPUT" 2>"$SUMMARY_TEST_OUTPUT.stderr" || return 1
+    [[ ! -s "$SUMMARY_TEST_OUTPUT.stderr" ]] || return 1
+    awk '
+      /^\[/ { section=$0 }
+      /账号清单读取失败|也是 UID 0 账号/ {
+        found++; if (section!="[账号与公钥]" || !/^    /) bad=1
+      }
+      END { exit !(found==1 && !bad) }
+    ' "$SUMMARY_TEST_OUTPUT" || return 1
+  done
+)
+
+test_summary_failed_dump_warning_follows_banner_in_ssh_section() (
+  make_summary_fixture || return 1
+  SUMMARY_TEST_SSHD_FAIL=yes
+  warn() { printf '[注意] %s\n' "$*"; }
+  summary >"$SUMMARY_TEST_OUTPUT" || return 1
+  awk '
+    /当前状态/ { banner++ }
+    /^\[/ { section=$0 }
+    /无法读取 SSH 有效配置/ {
+      found++; if (banner!=1 || section!="[SSH 全局策略]" || !/^    /) bad=1
+    }
+    END { exit !(found==1 && !bad) }
+  ' "$SUMMARY_TEST_OUTPUT"
+)
+
+test_summary_command_errors_are_indented_in_their_sections() (
+  make_summary_fixture || return 1
+  ss() { printf 'listener read failure\n' >&2; return 1; }
+  ufw() { printf 'firewall read failure\n' >&2; return 1; }
+  warn() { printf '[注意] %s\n' "$*"; }
+  summary >"$SUMMARY_TEST_OUTPUT" 2>"$SUMMARY_TEST_OUTPUT.stderr" || return 1
+  [[ ! -s "$SUMMARY_TEST_OUTPUT.stderr" ]] \
+    && grep -qxF '    listener read failure' "$SUMMARY_TEST_OUTPUT" \
+    && grep -qxF '    firewall read failure' "$SUMMARY_TEST_OUTPUT" \
+    && grep -qxF '    [注意] 读取监听端口失败' "$SUMMARY_TEST_OUTPUT" \
+    && grep -qxF '    [注意] 无法读取 UFW 规则' "$SUMMARY_TEST_OUTPUT"
 )
 
 test_timezone_default_and_menu_match() (
