@@ -24,6 +24,7 @@ DEFAULT_ADMIN="admin"
 TTY=/dev/tty
 
 c_red=$'\e[31m'; c_grn=$'\e[32m'; c_ylw=$'\e[33m'; c_blu=$'\e[36m'; c_off=$'\e[0m'
+c_title=$'\e[1;96m'
 info() { echo "${c_blu}[信息]${c_off} $*"; }
 ok()   { echo "${c_grn}[完成]${c_off} $*"; }
 skip() { echo "${c_ylw}[跳过]${c_off} $*"; }
@@ -947,6 +948,9 @@ summary_accounts() {
   [[ "$uncertain" == no ]] || warn "+? 表示部分密钥来源未能读取或校验, 数量可能不完整"
   return 0
 }
+summary_title() {
+  printf '\n\n%s################################################################\n                           当前状态\n################################################################%s\n' "$c_title" "$c_off"
+}
 summary_section() { printf '\n%s========== %s ==========%s\n' "$c_blu" "$1" "$c_off"; }
 summary_status() { # summary_status label actual expected
   local value="${2:-未知 (读取失败)}" color="$c_red"
@@ -967,7 +971,7 @@ summary() {
   if [[ -z "$dump" ]]; then allow="未知 (读取失败)"
   elif [[ -z "$allow" ]]; then allow="未设置 (没有用户名白名单, 不代表仅允许 admin)"; fi
   ip=$(public_ip)
-  summary_section "当前状态"
+  summary_title
   echo "主机名         : $(hostname)"
   echo "时区           : $(timedatectl show -p Timezone --value 2>/dev/null)"
   echo "swap           : $(swapon --show=NAME,SIZE --noheadings 2>/dev/null | paste -sd' ' -)"

@@ -1049,6 +1049,14 @@ test_summary_failed_queries_are_red_unknown_not_green() (
   ! grep -qF "$c_grn" "$SUMMARY_TEST_OUTPUT"
 )
 
+test_summary_main_banner_is_bold_bright_and_separated() (
+  make_summary_fixture || return 1
+  summary >"$SUMMARY_TEST_OUTPUT" || return 1
+  local output
+  output=$(<"$SUMMARY_TEST_OUTPUT")
+  [[ "$c_title" != "$c_blu" && "$output" == *$'\n\n'"${c_title}################################################################"$'\n                           当前状态\n################################################################'"${c_off}"$'\n'* ]]
+)
+
 test_summary_sections_have_colored_headers_and_blank_lines() (
   make_summary_fixture || return 1
   summary >"$SUMMARY_TEST_OUTPUT" || return 1
