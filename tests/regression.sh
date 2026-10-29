@@ -506,6 +506,12 @@ test_sshd_val_rejects_partial_dump_on_failure() (
   [[ -z "$output" ]]
 )
 
+test_sshd_dump_val_deduplicates_without_losing_distinct_values() (
+  local dump=$'port 6090\nport 6090\nport 22222\nallowusers admin admin opc\nallowusers opc other'
+  [[ "$(sshd_dump_val "$dump" port)" == '6090 22222' \
+    && "$(sshd_dump_val "$dump" AllowUsers)" == 'admin opc other' ]]
+)
+
 make_noroot_fixture() {
   ADMIN_USER='admin'
   NOROOT_TEST_ROOT=no
@@ -561,6 +567,13 @@ test_noroot_existing_root_ban_still_configures_allowusers() (
 test_noroot_skips_only_after_both_policies_are_verified() (
   make_noroot_fixture
   NOROOT_TEST_ALLOW='admin'
+  step_noroot || return 1
+  [[ "$NOROOT_TEST_CALLS" == 'verify:PermitRootLogin no AllowUsers admin;' ]]
+)
+
+test_noroot_duplicate_allowusers_is_already_configured() (
+  make_noroot_fixture
+  sshd_val() { sshd_dump_val $'permitrootlogin no\nallowusers admin admin\nallowusers admin' "$1"; }
   step_noroot || return 1
   [[ "$NOROOT_TEST_CALLS" == 'verify:PermitRootLogin no AllowUsers admin;' ]]
 )
@@ -931,6 +944,23 @@ test_summary_security_targets_are_green() (
     && grep -qF "键盘交互认证   : ${c_grn}no${c_off}" "$SUMMARY_TEST_OUTPUT" \
     && grep -qF "AllowUsers     : ${c_grn}admin${c_off}" "$SUMMARY_TEST_OUTPUT" \
     && grep -qF "UFW 已启用     : ${c_grn}yes${c_off}" "$SUMMARY_TEST_OUTPUT"
+)
+
+test_summary_deduplicates_ports_and_allowusers() (
+  make_summary_fixture || return 1
+  SUMMARY_TEST_DUMP+=$'\nport 6090\nallowusers admin admin\nallowusers admin'
+  summary >"$SUMMARY_TEST_OUTPUT" || return 1
+  grep -qxF 'SSH 端口       : 6090' "$SUMMARY_TEST_OUTPUT" \
+    && grep -qxF "AllowUsers     : ${c_grn}admin${c_off}" "$SUMMARY_TEST_OUTPUT" \
+    && grep -qxF '    User admin' "$SUMMARY_TEST_OUTPUT"
+)
+
+test_summary_deduplication_still_reports_other_allowed_users() (
+  make_summary_fixture || return 1
+  SUMMARY_TEST_DUMP+=$'\nport 22222\nallowusers admin other admin'
+  summary >"$SUMMARY_TEST_OUTPUT" || return 1
+  grep -qxF 'SSH 端口       : 6090 22222' "$SUMMARY_TEST_OUTPUT" \
+    && grep -qxF "AllowUsers     : ${c_red}admin other${c_off}" "$SUMMARY_TEST_OUTPUT"
 )
 
 test_summary_unsafe_security_values_are_red() (

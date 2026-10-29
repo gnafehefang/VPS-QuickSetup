@@ -86,8 +86,8 @@ apt_install() { # apt_install pkg...
 ssh_svc() {
   if systemctl list-unit-files ssh.service >/dev/null 2>&1 && systemctl cat ssh.service >/dev/null 2>&1; then echo ssh; else echo sshd; fi
 }
-sshd_dump_val() { # sshd_dump_val dump key (保留多值及重复指令中的全部值)
-  awk -v k="${2,,}" '$1==k{for(i=2;i<=NF;i++) print $i}' <<<"$1" | paste -sd' ' -
+sshd_dump_val() { # 保留多值顺序, 相同值只显示一次, 不丢弃不同用户或端口。
+  awk -v k="${2,,}" '$1==k{for(i=2;i<=NF;i++) if(!seen[$i]++) print $i}' <<<"$1" | paste -sd' ' -
 }
 sshd_val() {
   local dump
