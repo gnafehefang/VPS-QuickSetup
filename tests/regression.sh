@@ -1057,6 +1057,21 @@ test_summary_main_banner_is_bold_bright_and_separated() (
   [[ "$c_title" != "$c_blu" && "$output" == *$'\n\n'"${c_title}################################################################"$'\n                           当前状态\n################################################################'"${c_off}"$'\n'* ]]
 )
 
+summary_note_after_blank() {
+  awk -v text="$1" '
+    index($0, "[说明] " text) { found++; if (previous !~ /^[[:space:]]*$/) bad=1 }
+    { previous=$0 }
+    END { exit !(found==1 && !bad) }
+  ' "$SUMMARY_TEST_OUTPUT"
+}
+
+test_summary_ssh_explanation_starts_after_blank_line() (
+  make_summary_fixture || return 1
+  summary >"$SUMMARY_TEST_OUTPUT" || return 1
+  summary_note_after_blank '以上为全局有效配置' \
+    && grep -qF '       启用密钥认证不代表已验证登录。' "$SUMMARY_TEST_OUTPUT"
+)
+
 test_summary_sections_have_colored_headers_and_blank_lines() (
   make_summary_fixture || return 1
   summary >"$SUMMARY_TEST_OUTPUT" || return 1

@@ -952,6 +952,11 @@ summary_title() {
   printf '\n\n%s################################################################\n                           当前状态\n################################################################%s\n' "$c_title" "$c_off"
 }
 summary_section() { printf '\n%s========== %s ==========%s\n' "$c_blu" "$1" "$c_off"; }
+summary_note() {
+  printf '\n[说明] %s\n' "$1"
+  shift
+  while (( $# )); do printf '       %s\n' "$1"; shift; done
+}
 summary_status() { # summary_status label actual expected
   local value="${2:-未知 (读取失败)}" color="$c_red"
   [[ -n "${2:-}" && "$2" == "$3" ]] && color="$c_grn"
@@ -983,7 +988,8 @@ summary() {
   summary_status "密钥登录       " "$(sshd_dump_val "$dump" pubkeyauthentication)" yes
   summary_status "键盘交互认证   " "$(sshd_dump_val "$dump" kbdinteractiveauthentication)" no
   printf 'AllowUsers     : %s%s%s\n' "$allow_color" "$allow" "$c_off"
-  echo "以上为全局有效配置, Match 等规则可能按用户或来源另行限制; 启用密钥认证不代表已验证登录。"
+  summary_note "以上为全局有效配置, Match 等规则可能按用户或来源另行限制;" \
+    "启用密钥认证不代表已验证登录。"
   summary_section "账号与公钥"
   summary_accounts || true
   summary_section "TCP / UDP 监听"
