@@ -871,8 +871,14 @@ summary_accounts() {
   done <<<"$accounts"
   return 0
 }
+summary_section() { printf '\n%s========== %s ==========%s\n' "$c_blu" "$1" "$c_off"; }
+summary_status() { # summary_status label actual expected
+  local value="${2:-未知 (读取失败)}" color="$c_red"
+  [[ -n "${2:-}" && "$2" == "$3" ]] && color="$c_grn"
+  printf '%s: %s%s%s\n' "$1" "$color" "$value" "$c_off"
+}
 summary() {
-  local port user ip dump="" ports allow
+  local port user ip dump="" ports allow allow_color="$c_red" ufw_dump f2b_dump
   if ! { mkdir -p "$SSHD_RUN_DIR" && dump=$(sshd -T 2>/dev/null); }; then
     dump=""
     warn "无法读取 SSH 有效配置, 不生成登录示例"
@@ -881,34 +887,52 @@ summary() {
   read -r port _ <<<"$ports"
   user=$(summary_login_user "$dump") || user=""
   allow=$(sshd_dump_val "$dump" allowusers)
+  if [[ -n "$allow" && -n "$user" && "$user" != root && "$allow" == "$user" ]]; then allow_color="$c_grn"; fi
   if [[ -z "$dump" ]]; then allow="未知 (读取失败)"
   elif [[ -z "$allow" ]]; then allow="未设置 (没有用户名白名单, 不代表仅允许 admin)"; fi
   ip=$(public_ip)
-  echo; echo "${c_grn}================ 当前状态 ================${c_off}"
+  summary_section "当前状态"
   echo "主机名         : $(hostname)"
-  echo "SSH 端口       : ${ports:-未知}"
-  echo "root 登录      : $(sshd_dump_val "$dump" permitrootlogin)"
-  echo "密码登录       : $(sshd_dump_val "$dump" passwordauthentication)"
-  echo "AllowUsers     : $allow"
   echo "时区           : $(timedatectl show -p Timezone --value 2>/dev/null)"
   echo "swap           : $(swapon --show=NAME,SIZE --noheadings 2>/dev/null | paste -sd' ' -)"
   echo "拥塞控制       : $(sysctl -n net.ipv4.tcp_congestion_control) / $(sysctl -n net.core.default_qdisc)"
-  echo; echo "--- 账号与公钥 ---"
+  summary_section "SSH 全局策略"
+  echo "SSH 端口       : ${ports:-未知}"
+  summary_status "root 登录      " "$(sshd_dump_val "$dump" permitrootlogin)" no
+  summary_status "密码登录       " "$(sshd_dump_val "$dump" passwordauthentication)" no
+  summary_status "密钥登录       " "$(sshd_dump_val "$dump" pubkeyauthentication)" yes
+  summary_status "键盘交互认证   " "$(sshd_dump_val "$dump" kbdinteractiveauthentication)" no
+  printf 'AllowUsers     : %s%s%s\n' "$allow_color" "$allow" "$c_off"
+  echo "以上为全局有效配置, Match 等规则可能按用户或来源另行限制; 启用密钥认证不代表已验证登录。"
+  summary_section "账号与公钥"
   summary_accounts || true
   echo "公钥文件配置   : $(sshd_dump_val "$dump" authorizedkeysfile)"
   echo "公钥查询命令   : $(sshd_dump_val "$dump" authorizedkeyscommand)"
   echo "用户 CA 配置   : $(sshd_dump_val "$dump" trustedusercakeys)"
-  echo; echo "--- TCP / UDP 监听 ---"
+  summary_section "TCP / UDP 监听"
   if command -v ss >/dev/null; then ss -lntup || warn "读取监听端口失败"
   else warn "ss 未安装, 无法显示实际监听"; fi
   echo "以上包含回环和系统服务监听, 不是公网可达性测试。"
-  echo
-  echo "--- UFW ---"
-  if command -v ufw >/dev/null; then LC_ALL=C ufw status numbered || warn "无法读取 UFW 规则"; else echo "未安装"; fi
+  summary_section "UFW 防火墙"
+  if command -v ufw >/dev/null; then
+    if ufw_dump=$(LC_ALL=C ufw status numbered); then
+      case "$ufw_dump" in
+        *'Status: active'*) summary_status "UFW 已启用     " yes yes ;;
+        *'Status: inactive'*) summary_status "UFW 已启用     " no yes ;;
+        *) summary_status "UFW 已启用     " "" yes ;;
+      esac
+      printf '%s\n' "$ufw_dump"
+    else summary_status "UFW 已启用     " "" yes; warn "无法读取 UFW 规则"; fi
+  else summary_status "UFW 已启用     " no yes; echo "未安装"; fi
   echo "保留既有规则, 不自动清空; 放行端口不等于有进程监听, UFW 也不代表云防火墙或全部 netfilter 规则。"
-  echo "--- fail2ban ---"
-  if command -v fail2ban-client >/dev/null; then fail2ban-client status sshd 2>/dev/null || echo "sshd jail 未运行"; else echo "未安装"; fi
-  echo; echo "本机 ~/.ssh/config 可添加:"
+  summary_section "fail2ban"
+  if command -v fail2ban-client >/dev/null; then
+    if f2b_dump=$(fail2ban-client status sshd 2>/dev/null); then
+      summary_status "sshd jail 就绪 " yes yes
+      printf '%s\n' "$f2b_dump"
+    else summary_status "sshd jail 就绪 " "" yes; echo "查询失败或 sshd jail 未运行"; fi
+  else summary_status "sshd jail 就绪 " no yes; echo "未安装"; fi
+  summary_section "本机 ~/.ssh/config 可添加"
   if [[ -n "$user" && -n "$port" ]]; then
     cat <<EOT
 Host $(hostname)
@@ -920,7 +944,7 @@ EOT
   else
     warn "未确认可用的密钥登录用户或端口, 不猜测 User root; 请核对账户、公钥及 SSH 准入规则"
   fi
-  [[ -d "$BACKUP_DIR" ]] && echo "配置备份目录: $BACKUP_DIR"
+  if [[ -d "$BACKUP_DIR" ]]; then summary_section "配置备份"; echo "$BACKUP_DIR"; fi
   return 0
 }
 

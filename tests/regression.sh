@@ -573,7 +573,7 @@ make_summary_login_fixture() {
   ADMIN_USER=''
   SUDO_USER=''
   DEFAULT_ADMIN='admin'
-  SUMMARY_TEST_DUMP=$'port 6090\npermitrootlogin no\npasswordauthentication no\npubkeyauthentication yes\nauthenticationmethods any'
+  SUMMARY_TEST_DUMP=$'port 6090\npermitrootlogin no\npasswordauthentication no\npubkeyauthentication yes\nkbdinteractiveauthentication no\nauthenticationmethods any\nauthorizedkeysfile .ssh/authorized_keys .ssh/authorized_keys2\nauthorizedkeyscommand none\ntrustedusercakeys none'
   SUMMARY_TEST_KEY_USERS='root admin opc'
   SUMMARY_TEST_SHELL=/bin/bash
   SUMMARY_TEST_SSHD_FAIL=no
@@ -753,6 +753,57 @@ test_summary_network_audit_only_reads_rules_and_listeners() (
   grep -qF '[ 2] 59625/tcp' "$SUMMARY_TEST_OUTPUT" \
     && grep -qF '127.0.0.1:59625' "$SUMMARY_TEST_OUTPUT" \
     && grep -qF '保留既有规则' "$SUMMARY_TEST_OUTPUT"
+)
+
+test_summary_security_targets_are_green() (
+  make_summary_fixture || return 1
+  SUMMARY_TEST_DUMP+=$'\nallowusers admin'
+  summary >"$SUMMARY_TEST_OUTPUT" || return 1
+  grep -qF "root 登录      : ${c_grn}no${c_off}" "$SUMMARY_TEST_OUTPUT" \
+    && grep -qF "密码登录       : ${c_grn}no${c_off}" "$SUMMARY_TEST_OUTPUT" \
+    && grep -qF "密钥登录       : ${c_grn}yes${c_off}" "$SUMMARY_TEST_OUTPUT" \
+    && grep -qF "键盘交互认证   : ${c_grn}no${c_off}" "$SUMMARY_TEST_OUTPUT" \
+    && grep -qF "AllowUsers     : ${c_grn}admin${c_off}" "$SUMMARY_TEST_OUTPUT" \
+    && grep -qF "UFW 已启用     : ${c_grn}yes${c_off}" "$SUMMARY_TEST_OUTPUT"
+)
+
+test_summary_unsafe_security_values_are_red() (
+  make_summary_fixture || return 1
+  SUMMARY_TEST_DUMP=${SUMMARY_TEST_DUMP/permitrootlogin no/permitrootlogin yes}
+  SUMMARY_TEST_DUMP=${SUMMARY_TEST_DUMP/passwordauthentication no/passwordauthentication yes}
+  SUMMARY_TEST_DUMP=${SUMMARY_TEST_DUMP/pubkeyauthentication yes/pubkeyauthentication no}
+  SUMMARY_TEST_DUMP=${SUMMARY_TEST_DUMP/kbdinteractiveauthentication no/kbdinteractiveauthentication yes}
+  ufw() { printf 'Status: inactive\n'; }
+  summary >"$SUMMARY_TEST_OUTPUT" || return 1
+  grep -qF "root 登录      : ${c_red}yes${c_off}" "$SUMMARY_TEST_OUTPUT" \
+    && grep -qF "密码登录       : ${c_red}yes${c_off}" "$SUMMARY_TEST_OUTPUT" \
+    && grep -qF "密钥登录       : ${c_red}no${c_off}" "$SUMMARY_TEST_OUTPUT" \
+    && grep -qF "键盘交互认证   : ${c_red}yes${c_off}" "$SUMMARY_TEST_OUTPUT" \
+    && grep -qF "AllowUsers     : ${c_red}未设置" "$SUMMARY_TEST_OUTPUT" \
+    && grep -qF "UFW 已启用     : ${c_red}no${c_off}" "$SUMMARY_TEST_OUTPUT"
+)
+
+test_summary_failed_queries_are_red_unknown_not_green() (
+  make_summary_fixture || return 1
+  SUMMARY_TEST_SSHD_FAIL=yes
+  ufw() { printf 'Status: active\n'; return 1; }
+  fail2ban-client() { printf 'Status for the jail: sshd\n'; return 1; }
+  summary >"$SUMMARY_TEST_OUTPUT" || return 1
+  local label
+  for label in 'root 登录      ' '密码登录       ' '密钥登录       ' '键盘交互认证   ' 'UFW 已启用     ' 'sshd jail 就绪 '; do
+    grep -qF "$label: ${c_red}未知 (读取失败)${c_off}" "$SUMMARY_TEST_OUTPUT" || return 1
+  done
+  ! grep -qF "$c_grn" "$SUMMARY_TEST_OUTPUT"
+)
+
+test_summary_sections_have_colored_headers_and_blank_lines() (
+  make_summary_fixture || return 1
+  summary >"$SUMMARY_TEST_OUTPUT" || return 1
+  local output section
+  output=$(<"$SUMMARY_TEST_OUTPUT")
+  for section in 'SSH 全局策略' '账号与公钥' 'TCP / UDP 监听' 'UFW 防火墙' 'fail2ban' '本机 ~/.ssh/config 可添加'; do
+    [[ "$output" == *$'\n\n'"${c_blu}========== $section ==========${c_off}"$'\n'* ]] || return 1
+  done
 )
 
 test_timezone_default_and_menu_match() (
